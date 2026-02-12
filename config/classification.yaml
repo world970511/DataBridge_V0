@@ -1,0 +1,12 @@
+rules:
+  # 정형 데이터 → DB 적재
+  - patterns: ["*.xlsx", "*.xls", "*.csv", "*.tsv"]
+    action: load_to_db
+
+  # 비정형 문서 → 검색 등록
+  - patterns: ["*.pdf", "*.hwp", "*.hwpx", "*.docx", "*.txt"]
+    action: register_for_search
+
+  # 무시할 파일
+  - patterns: ["~$*", "*.tmp", "Thumbs.db", ".DS_Store", "*.swp", "*.lock"]
+    action: ignore

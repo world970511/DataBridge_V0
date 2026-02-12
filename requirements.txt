@@ -1,0 +1,25 @@
+# === Core ===
+psycopg2-binary>=2.9,<3.0
+chromadb>=0.5,<1.0
+requests>=2.31,<3.0
+pyyaml>=6.0,<7.0
+python-dotenv>=1.0,<2.0
+
+# === File Watcher ===
+watchdog>=4.0,<5.0
+
+# === Data Loading ===
+pandas>=2.1,<3.0
+openpyxl>=3.1,<4.0
+
+# === Document Parsing ===
+pypdf>=4.0,<5.0
+python-docx>=1.1,<2.0
+
+# === RAG / Embedding ===
+# ChromaDB 내장 임베딩 사용 (sentence-transformers 자동 설치됨)
+
+# === Future: Agent / UI ===
+# langchain>=0.2,<1.0
+# langgraph>=0.1,<1.0
+# streamlit>=1.35,<2.0
