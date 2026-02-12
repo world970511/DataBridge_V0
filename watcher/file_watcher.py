@@ -6,6 +6,7 @@ watchdog 기반 공유 폴더 감시.
 import logging
 import time
 from pathlib import Path
+from typing import Optional
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -62,7 +63,7 @@ class FileEventHandler(FileSystemEventHandler):
             logger.exception(f"Error processing file: {file_path}")
 
 
-def start_watcher(watch_dir: str | None = None, blocking: bool = True):
+def start_watcher(watch_dir: Optional[str] = None, blocking: bool = True):
     """폴더 감시 시작."""
     if watch_dir is None:
         watch_dir = get_settings().watcher.watch_dir

@@ -6,6 +6,7 @@ DataBridge 설정 로딩 모듈.
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 
 @dataclass
@@ -108,7 +109,7 @@ def load_settings() -> Settings:
 
 
 # 싱글톤 인스턴스
-_settings: Settings | None = None
+_settings: Optional[Settings] = None
 
 
 def get_settings() -> Settings:

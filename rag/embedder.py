@@ -4,6 +4,7 @@ Ollama 임베딩 모델 또는 ChromaDB 기본 임베딩 사용.
 """
 
 import logging
+from typing import Optional
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
@@ -13,7 +14,7 @@ from rag.chunker import Chunk
 
 logger = logging.getLogger(__name__)
 
-_client: chromadb.HttpClient | None = None
+_client: Optional[chromadb.HttpClient] = None
 
 
 def get_chroma_client() -> chromadb.HttpClient:
