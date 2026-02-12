@@ -3,6 +3,7 @@
 import logging
 import re
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import numpy as np
@@ -61,9 +62,9 @@ def log_file_process(
     file_path: str,
     file_type: str,
     action: str,
-    target_table: str | None = None,
+    target_table: Optional[str] = None,
     status: str = "success",
-    error_message: str | None = None,
+    error_message: Optional[str] = None,
 ):
     """파일 처리 이력을 DB에 기록."""
     try:

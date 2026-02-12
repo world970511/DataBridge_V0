@@ -2,6 +2,7 @@
 
 import logging
 from contextlib import contextmanager
+from typing import Optional
 
 import psycopg2
 from psycopg2 import pool
@@ -11,7 +12,7 @@ from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
-_pool: pool.SimpleConnectionPool | None = None
+_pool: Optional[pool.SimpleConnectionPool] = None
 
 
 def get_pool() -> pool.SimpleConnectionPool:
@@ -59,7 +60,6 @@ def execute_query(sql: str, params: tuple = None, dict_cursor: bool = True) -> l
     with get_cursor(dict_cursor=dict_cursor) as cur:
         cur.execute(sql, params)
         return cur.fetchall()
-
 
 def execute_command(sql: str, params: tuple = None) -> int:
     """INSERT/UPDATE/DELETE 등 실행, 영향 받은 행 수 반환."""

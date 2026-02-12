@@ -19,7 +19,14 @@ python-docx>=1.1,<2.0
 # === RAG / Embedding ===
 # ChromaDB 내장 임베딩 사용 (sentence-transformers 자동 설치됨)
 
+# === Testing ===
+pytest>=8.0,<9.0
+pytest-cov>=5.0,<6.0
+
+# === Sample Data Generation ===
+fpdf2>=2.7,<3.0
+
 # === Future: Agent / UI ===
-# langchain>=0.2,<1.0
-# langgraph>=0.1,<1.0
-# streamlit>=1.35,<2.0
+langchain>=0.2,<1.0
+langgraph>=0.1,<1.0
+streamlit>=1.35,<2.0

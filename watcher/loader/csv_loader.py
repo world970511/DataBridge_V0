@@ -5,6 +5,7 @@ CSV/TSV 파일 → PostgreSQL 테이블 자동 적재.
 import logging
 import re
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
@@ -19,7 +20,7 @@ from watcher.loader._utils import (
 logger = logging.getLogger(__name__)
 
 
-def load_csv(file_path: str) -> str | None:
+def load_csv(file_path: str) -> Optional[str]:
     """
     CSV/TSV 파일을 읽어 PostgreSQL에 테이블로 적재.
     Returns: 생성된 테이블 이름 또는 None.

@@ -5,6 +5,7 @@
 
 import json
 import logging
+from typing import Optional
 
 from db.connection import get_cursor, execute_query
 
@@ -62,7 +63,7 @@ def list_tables() -> list[dict]:
     )
 
 
-def get_table_info(table_name: str) -> dict | None:
+def get_table_info(table_name: str) -> Optional[dict]:
     """특정 테이블의 메타데이터 반환."""
     rows = execute_query(
         "SELECT * FROM catalog_tables WHERE table_name = %s",
