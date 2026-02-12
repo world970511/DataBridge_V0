@@ -25,6 +25,7 @@
 ```
 ✅ 회사 데이터가 외부로 나가면 안 되는데, AI를 쓰고 싶다
 ✅ 데이터 관리를 공유 폴더 + 엑셀 + 배치 스크립트로 하고 있다
+✅ 외부 업체가 FTP/SFTP로 보내주는 파일을 수동으로 확인하고 정리하고 있다
 ✅ "이 데이터 좀 뽑아주세요" 요청이 올 때마다 SQL을 직접 짜고 있다
 ✅ 보고서 PDF 하나 찾으려고 공유 폴더를 뒤지고 있다
 ✅ 부서별 분석 테이블을 수작업으로 만들고, 배치 스크립트로 갱신하고 있다
@@ -124,10 +125,11 @@ MCP와 Open WebUI는 "질문하면 답해주는" 도구입니다.
 
 <h2 id="how-it-works">어떻게 동작하나요?</h2>
 
-### 1단계: 공유 폴더에 파일을 넣습니다 (지금 하던 대로)
+### 1단계: 파일을 넣습니다 (지금 하던 대로)
+
+**방법 A — 공유 폴더** (SAMBA / NAS / 로컬 폴더)
 
 ```
-공유 폴더 (SAMBA / NAS / 로컬 폴더)
   📁 /data/
     ├── 매출/
     │   ├── 2025년1월_매출.xlsx     ← 엑셀, CSV 넣으면
@@ -138,6 +140,23 @@ MCP와 Open WebUI는 "질문하면 답해주는" 도구입니다.
     └── 로그/
         └── 서버로그_0210.csv       ← 무슨 파일이든 알아서 분류합니다
 ```
+
+**방법 B — FTP / SFTP / FTPS 서버** (외부 업체 연동, 지점 데이터 수집)
+
+```
+  외부 업체 / 지점에서 FTP/SFTP로 파일 업로드
+       │
+       ▼
+  FTP/SFTP 서버 (ProFTPD, vsftpd, OpenSSH 등)
+       │
+       │  업로드 완료 → 서버 훅이 DataBridge에 알림 (자동)
+       ▼
+  DataBridge 수신 → 분류 → DB 적재 / 문서 검색 등록
+```
+
+> 💡 FTP/SFTP 서버에 **업로드 완료 훅**을 설정하면, 파일이 올라오는 즉시 DataBridge가 처리합니다.
+> 주기적으로 폴더를 확인하는 방식이 아니라 **이벤트 기반**으로 동작합니다.
+> 설정 방법은 [FTP/SFTP 서버 훅 설정](#ftp-sftp-hook) 을 참고하세요.
 
 ### 2단계: AI 채팅으로 물어봅니다
 
@@ -224,20 +243,24 @@ MCP와 Open WebUI는 "질문하면 답해주는" 도구입니다.
 │  (SAMBA/NAS)     │  올리면   │  엑셀/CSV → DB 자동 적재     │
 │                  │  자동감지  │  문서 → 검색 자동 등록       │
 │                  │           │                              │
-└──────────────────┘           │  🗄️ DB (PostgreSQL)          │
-                               │  정리된 데이터 저장           │
-┌──────────────────┐           │                              │
-│  기존 DB         │           │  🔍 문서 검색 (ChromaDB)     │
-│  (있으면 연결,   │──선택──▶  │  PDF/HWP/Word 내용 검색      │
-│   없어도 됨)     │           │                              │
-└──────────────────┘           │  🤖 AI 에이전트 (Ollama)     │
-                               │  ├ 데이터 조회 (SQL Agent)   │
-┌──────────────────┐           │  ├ 문서 검색 (Doc Agent)     │
-│  기존 cron 배치  │           │  ├ 마트 구축 (Mart Builder)  │
-│  (그대로 유지)   │           │  └ 배치 관리 (Scheduler)     │
+└──────────────────┘           │  🔗 Webhook API              │
+                               │  FTP/SFTP 서버 훅 수신       │
+┌──────────────────┐           │  외부 시스템 연동 가능       │
+│  FTP/SFTP 서버   │──업로드──▶│                              │
+│  (ProFTPD,       │  완료 훅  │  🗄️ DB (PostgreSQL)          │
+│   OpenSSH 등)    │           │  정리된 데이터 저장           │
 └──────────────────┘           │                              │
-                               │  ✅ 승인 레이어               │
-                               │  DDL/배치는 사용자 승인 필수  │
+                               │  🔍 문서 검색 (ChromaDB)     │
+┌──────────────────┐           │  PDF/HWP/Word 내용 검색      │
+│  기존 DB         │           │                              │
+│  (있으면 연결,   │──선택──▶  │  🤖 AI 에이전트 (Ollama)     │
+│   없어도 됨)     │           │  ├ 데이터 조회 (SQL Agent)   │
+└──────────────────┘           │  ├ 문서 검색 (Doc Agent)     │
+                               │  ├ 마트 구축 (Mart Builder)  │
+┌──────────────────┐           │  └ 배치 관리 (Scheduler)     │
+│  기존 cron 배치  │           │                              │
+│  (그대로 유지)   │           │  ✅ 승인 레이어               │
+└──────────────────┘           │  DDL/배치는 사용자 승인 필수  │
                                │                              │
                                │  💬 채팅 UI (웹브라우저)     │
                                │  http://서버IP:8501          │
@@ -246,7 +269,7 @@ MCP와 Open WebUI는 "질문하면 답해주는" 도구입니다.
                                └──────────────────────────────┘
 ```
 
-> **기존 환경을 건드리지 않습니다.** 공유 폴더도 그대로, cron도 그대로.
+> **기존 환경을 건드리지 않습니다.** 공유 폴더도 그대로, FTP 서버도 그대로, cron도 그대로.
 > 옆에 서버 하나 설치하는 것뿐입니다.
 
 ---
@@ -300,6 +323,10 @@ docker compose exec ollama ollama pull exaone3.5:7.8b
 
 ### 데이터 올리기
 
+데이터를 넣는 방법은 3가지입니다. 동시에 사용할 수 있습니다.
+
+**방법 1 — 공유 폴더** (가장 기본)
+
 공유 폴더 안에 파일을 넣으면 됩니다. 하위 폴더를 자유롭게 만들 수 있습니다.
 
 | 파일 종류 | 처리 방식 | 예시 |
@@ -313,6 +340,28 @@ docker compose exec ollama ollama pull exaone3.5:7.8b
 
 > 💡 파일을 넣으면 보통 **몇 초~1분 이내**에 자동으로 처리됩니다.
 > 처리 상태는 채팅에서 `"최근 등록된 파일 목록"` 으로 확인할 수 있습니다.
+
+**방법 2 — FTP / SFTP / FTPS 서버 훅**
+
+FTP/SFTP 서버에 업로드 완료 훅을 설정하면, 외부 업체나 지점에서 파일을 올릴 때마다 자동으로 처리됩니다. 설정 방법은 [FTP/SFTP 서버 훅 설정](#ftp-sftp-hook) 을 참고하세요.
+
+```
+외부 업체가 SFTP로 납품 데이터 업로드
+  → 서버 훅이 DataBridge에 알림
+  → 자동으로 DB 적재
+  → "오늘 들어온 납품 데이터 보여줘" 로 즉시 조회
+```
+
+**방법 3 — Webhook API** (커스텀 연동)
+
+기존 배치 스크립트나 외부 시스템에서 직접 호출할 수 있습니다.
+
+```bash
+# 기존 스크립트 끝에 한 줄 추가
+curl -X POST http://databridge:8501/api/webhook/file-uploaded \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/data/new_file.csv", "source": "legacy_batch"}'
+```
 
 ### 채팅으로 조회하기
 
@@ -432,6 +481,7 @@ agentic-data-factory/
 │
 ├── watcher/                     # 👁️ 파일 감시
 │   ├── file_watcher.py          #   공유 폴더 변경 감지 (watchdog)
+│   ├── webhook.py               #   Webhook API (FTP/SFTP 훅, 외부 시스템 연동)
 │   ├── classifier.py            #   파일 유형 자동 분류
 │   └── loader/                  #   유형별 로더
 │       ├── excel_loader.py      #     엑셀 → DB
@@ -523,6 +573,10 @@ AGENT_QUERY_TIMEOUT=30            # 쿼리 타임아웃 (초)
 MART_PREFIX=mart_                  # 마트 테이블 접두사 (변경 비권장)
 JOB_LOG_DIR=./logs/jobs            # 배치 실행 로그 저장 경로
 
+# === Webhook API ===
+WEBHOOK_ENABLED=true               # FTP/SFTP 훅, 외부 시스템 연동용
+WEBHOOK_SECRET=changeme            # Webhook 인증 토큰 (반드시 변경하세요)
+
 # === 외부 DB 연결 (선택) ===
 # EXTERNAL_DB_TYPE=mysql
 # EXTERNAL_DB_HOST=192.168.1.100
@@ -564,6 +618,90 @@ rules:
 > 💡 GPU 없이도 됩니다. 다만 응답이 느립니다.
 > 처음에 CPU로 써보고, 유용하면 GPU를 추가하는 걸 추천합니다.
 
+<h3 id="ftp-sftp-hook">FTP/SFTP 서버 훅 설정 (선택)</h3>
+
+FTP/SFTP 서버에서 파일 업로드가 완료되면 DataBridge에 자동으로 알리도록 설정합니다.
+서버 종류에 따라 아래 중 하나를 선택하세요.
+
+**ProFTPD (FTP/FTPS)**
+
+```apache
+# /etc/proftpd/conf.d/databridge-hook.conf
+<IfModule mod_exec.c>
+  ExecOnCommand STOR,STOU "/usr/local/bin/notify_databridge.sh %f"
+</IfModule>
+```
+
+**vsftpd + incron (FTP/FTPS)**
+
+vsftpd는 자체 훅이 없으므로, `incron`으로 업로드 디렉토리를 감시합니다.
+
+```bash
+# incron 설치
+sudo apt install incron
+
+# /etc/incron.d/databridge
+/var/ftp/upload IN_CLOSE_WRITE /usr/local/bin/notify_databridge.sh $@/$#
+```
+
+**OpenSSH SFTP**
+
+```bash
+# /etc/ssh/sshd_config
+Subsystem sftp internal-sftp
+Match Group dataupload
+    ForceCommand internal-sftp -l INFO
+    ChrootDirectory /data/sftp/%u
+
+# SFTP 로그를 incron으로 감시하거나, 업로드 디렉토리를 직접 감시
+# /etc/incron.d/databridge-sftp
+/data/sftp IN_CLOSE_WRITE,recursive /usr/local/bin/notify_databridge.sh $@/$#
+```
+
+**공통 알림 스크립트 (모든 FTP/SFTP 서버에서 사용)**
+
+```bash
+#!/bin/bash
+# /usr/local/bin/notify_databridge.sh
+FILEPATH="$1"
+WEBHOOK_URL="http://databridge서버IP:8501/api/webhook/file-uploaded"
+WEBHOOK_SECRET="changeme"    # .env의 WEBHOOK_SECRET과 동일하게
+
+curl -s -X POST "$WEBHOOK_URL" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $WEBHOOK_SECRET" \
+  -d "{\"path\": \"$FILEPATH\", \"source\": \"ftp\"}"
+```
+
+```bash
+# 실행 권한 부여
+chmod +x /usr/local/bin/notify_databridge.sh
+```
+
+> 💡 **FTP 서버와 DataBridge가 같은 머신이라면?**
+> FTP 업로드 디렉토리를 `WATCH_DIR`에 직접 지정하면 됩니다. 훅 설정 없이 자동 감지됩니다.
+> 예: `WATCH_DIR=/var/ftp/upload`
+
+**Webhook API 직접 호출** (기존 시스템 연동)
+
+FTP/SFTP 외에도, 어떤 시스템이든 HTTP로 호출할 수 있습니다.
+
+```bash
+# 단일 파일 알림
+curl -X POST http://databridge:8501/api/webhook/file-uploaded \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $WEBHOOK_SECRET" \
+  -d '{"path": "/data/upload/sales_0210.csv", "source": "legacy_batch"}'
+
+# 응답
+# {"status": "accepted", "file": "sales_0210.csv"}
+```
+
+| API 엔드포인트 | 메서드 | 설명 |
+|---|---|---|
+| `/api/webhook/file-uploaded` | POST | 파일 업로드 알림. 분류 → 적재 파이프라인 실행 |
+| `/api/webhook/health` | GET | Webhook API 상태 확인 |
+
 ---
 
 ## 보안
@@ -602,7 +740,7 @@ rules:
 
 ## FAQ
 
-**Q: Docker를 몰라도 되나요?**
+**Q: Docker를 몰라도 되나요?**  
 설치할 때 명령어 3개만 입력하면 됩니다. Docker 자체를 다룰 필요는 없습니다.
 
 **Q: 인터넷이 안 되는 환경에서도 쓸 수 있나요?**  
@@ -618,7 +756,7 @@ rules:
 v0는 PostgreSQL만 지원합니다.
 
 **Q: 데이터가 많아지면 느려지나요?**  
-v0.1은 수만~수십만 행 규모에 최적화되어 있습니다.
+v0.1은 수만~수십만 행 규모에 최적화되어 있습니다. 수백만 행 이상이 되면 v1.x의 확장 아키텍처를 검토하세요.
 
 **Q: 여러 명이 동시에 쓸 수 있나요?**  
 채팅 UI에 여러 명이 동시 접속할 수 있습니다. 관리자는 사용자의 권한을 제어 가능합니다.
@@ -628,6 +766,12 @@ v0.1은 수만~수십만 행 규모에 최적화되어 있습니다.
 
 **Q: 배치 작업이 실패하면 어떻게 되나요?**  
 실행 이력과 에러 로그가 저장되며, 채팅에서 `"배치 실행 이력 보여줘"`로 확인할 수 있습니다. 실패한 배치는 자동 재시도하지 않으며, 원인 확인 후 수동으로 재실행할 수 있습니다.
+
+**Q: FTP/SFTP로 데이터를 받고 있는데 연동할 수 있나요?**  
+예. FTP/SFTP 서버에 업로드 완료 훅을 설정하면, 파일이 올라오는 즉시 DataBridge가 자동으로 처리합니다. ProFTPD, vsftpd, OpenSSH SFTP 모두 지원합니다. 설정은 [FTP/SFTP 서버 훅 설정](#ftp-sftp-hook) 을 참고하세요.
+
+**Q: FTP 서버와 DataBridge가 같은 서버에 있어야 하나요?**  
+아닙니다. 같은 서버에 있으면 FTP 업로드 디렉토리를 직접 감시할 수 있어 가장 간단하지만 그렇지 않더라도 Webhook API를 통해 연동할 수 있습니다.
 
 ---
 
