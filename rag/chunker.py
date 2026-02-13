@@ -1,6 +1,10 @@
 """
-텍스트 분할 (Chunking).
-긴 문서를 검색에 적합한 크기로 나눔.
+텍스트 분할(Chunking) 모듈.
+
+긴 문서 텍스트를 벡터 검색에 적합한 크기(기본 500자)의 청크로 분할합니다.
+분할 전략은 문단 경계 → 문장 경계 → 문자 단위 순서로 우선 적용하며,
+인접 청크 간 50자의 오버랩을 두어 문맥 연속성을 유지합니다.
+각 청크는 고유 ID, 텍스트, 출처·인덱스 메타데이터를 담은 Chunk 데이터클래스로 반환됩니다.
 """
 
 import logging
@@ -15,6 +19,13 @@ DEFAULT_CHUNK_OVERLAP = 50
 
 @dataclass
 class Chunk:
+    """
+    텍스트 청크를 표현하는 데이터클래스.
+
+    id: '{출처}_{인덱스}_{uuid8자}' 형태의 고유 식별자.
+    text: 청크의 실제 텍스트 내용.
+    metadata: 출처(source)와 청크 순서(chunk_index)를 담는 딕셔너리.
+    """
     id: str
     text: str
     metadata: dict
@@ -27,8 +38,12 @@ def chunk_text(
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> list[Chunk]:
     """
-    텍스트를 고정 크기 청크로 분할.
-    - 문단 경계 우선, 불가능하면 문장 경계, 최후에 문자 단위.
+    텍스트를 chunk_size(기본 500자) 이하의 청크들로 분할.
+
+    분할 전략: 줄바꿈 기준으로 문단을 분리한 뒤 chunk_size 이내에서 최대한 문단을 모읍니다.
+    문단이 chunk_size를 초과하면 문장 경계, 그래도 안 되면 문자 단위로 강제 분할합니다.
+    인접 청크 간 chunk_overlap(기본 50자)만큼 텍스트가 겹쳐 문맥 연속성을 유지합니다.
+    Returns: Chunk 데이터클래스 인스턴스들의 리스트 (빈 텍스트 입력 시 빈 리스트).
     """
     if not text or not text.strip():
         return []
@@ -74,6 +89,13 @@ def chunk_text(
 
 
 def _make_chunk(text: str, source: str, index: int) -> Chunk:
+    """
+    텍스트, 출처, 인덱스로 Chunk 객체를 생성.
+
+    ID는 '{source}_{index}_{uuid4 앞 8자}' 형태로 생성되며,
+    metadata에 source와 chunk_index를 포함합니다.
+    Returns: 생성된 Chunk 인스턴스.
+    """
     return Chunk(
         id=f"{source}_{index}_{uuid.uuid4().hex[:8]}",
         text=text.strip(),
@@ -82,7 +104,13 @@ def _make_chunk(text: str, source: str, index: int) -> Chunk:
 
 
 def _split_long_text(text: str, chunk_size: int, overlap: int) -> list[str]:
-    """긴 텍스트를 문장 경계에서 분할 시도, 실패 시 문자 단위."""
+    """
+    chunk_size를 초과하는 긴 텍스트를 더 작은 조각으로 분할.
+
+    먼저 문장 경계(.!?。 뒤 공백)에서 분할을 시도하고,
+    문장이 1개뿐이면 overlap을 적용하여 문자 단위로 강제 분할합니다.
+    Returns: 분할된 텍스트 조각들의 리스트.
+    """
     # 문장 경계 분할 시도
     sentences = _split_sentences(text)
     if len(sentences) > 1:
@@ -110,7 +138,13 @@ def _split_long_text(text: str, chunk_size: int, overlap: int) -> list[str]:
 
 
 def _split_sentences(text: str) -> list[str]:
-    """간단한 문장 분리."""
+    """
+    정규식을 사용하여 텍스트를 문장 단위로 분리.
+
+    마침표(.), 느낌표(!), 물음표(?), 한국어/일본어 마침표(。) 뒤의
+    공백을 기준으로 분할하며, 빈 문장은 제거합니다.
+    Returns: 문장 문자열들의 리스트.
+    """
     import re
     sentences = re.split(r'(?<=[.!?。])\s+', text)
     return [s.strip() for s in sentences if s.strip()]

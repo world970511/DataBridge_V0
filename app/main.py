@@ -1,10 +1,15 @@
 """
-DataBridge 앱 진입점.
-1. 설정 로드
-2. DB 연결 확인
-3. ChromaDB 연결 확인
-4. Ollama 연결 + 모델 확인
-5. File Watcher 시작
+DataBridge 애플리케이션 진입점 모듈.
+
+앱 시작 시 아래 순서로 필수 서비스 상태를 검증한 뒤 파일 감시를 시작합니다:
+1. 환경 변수 기반 설정 로드 (config/settings.py)
+2. PostgreSQL 연결 확인 → 실패 시 앱 종료
+3. ChromaDB 연결 확인 → 실패 시 앱 종료
+4. Ollama LLM 연결 및 모델 존재 확인 → 실패 시 경고만 출력 (에이전트 기능 제한)
+5. File Watcher를 데몬 스레드로 실행하여 공유 폴더를 감시
+
+메인 스레드는 watcher 스레드가 살아있는 동안 대기하며,
+Ctrl+C(KeyboardInterrupt) 입력 시 정상 종료됩니다.
 """
 
 import logging
@@ -26,7 +31,12 @@ logger = logging.getLogger("databridge")
 
 
 def startup_checks():
-    """기동 시 필수 서비스 연결 확인."""
+    """
+    앱 기동 시 PostgreSQL, ChromaDB, Ollama 세 가지 필수 서비스에 대해 연결 상태를 순서대로 확인.
+
+    PostgreSQL 또는 ChromaDB 연결 실패 시 sys.exit(1)로 앱을 종료하고,
+    Ollama 실패 시에는 경고 로그만 남기고 계속 진행합니다.
+    """
     logger.info("=== DataBridge Startup ===")
 
     settings = get_settings()
@@ -56,6 +66,14 @@ def startup_checks():
 
 
 def main():
+    """
+    DataBridge 메인 실행 함수.
+
+    startup_checks()로 서비스 상태를 확인한 후, File Watcher를
+    데몬 스레드로 실행하여 설정된 watch_dir을 감시합니다.
+    메인 스레드는 watcher_thread.join()으로 대기하다가
+    KeyboardInterrupt 발생 시 종료됩니다.
+    """
     startup_checks()
 
     settings = get_settings()

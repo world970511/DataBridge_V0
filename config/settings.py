@@ -1,6 +1,11 @@
 """
 DataBridge 설정 로딩 모듈.
-환경 변수(.env)에서 설정을 읽어 전역에서 사용.
+
+.env 파일 또는 시스템 환경 변수에서 설정값을 읽어와
+DatabaseConfig, ChromaConfig, OllamaConfig, AgentConfig, WatcherConfig
+다섯 개의 데이터클래스로 구성된 Settings 객체를 생성합니다.
+load_settings()로 매번 새로 로드하거나, get_settings()로 싱글톤 인스턴스를
+사용하여 애플리케이션 전역에서 동일한 설정을 공유합니다.
 """
 
 import os
@@ -65,7 +70,13 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    """환경 변수에서 설정을 로드하여 Settings 객체를 반환."""
+    """
+    환경 변수에서 각 서비스별 설정을 읽어 Settings 객체를 생성하여 반환.
+
+    os.getenv()를 통해 DATABASE_URL, POSTGRES_HOST, CHROMA_HOST, OLLAMA_HOST 등
+    환경 변수를 조회하며, 값이 없으면 개발 환경용 기본값(예: postgres, chromadb)을 사용합니다.
+    Returns: 모든 서비스 설정이 포함된 Settings 데이터클래스 인스턴스.
+    """
     db = DatabaseConfig(
         url=os.getenv("DATABASE_URL", ""),
         host=os.getenv("POSTGRES_HOST", "postgres"),
@@ -113,7 +124,13 @@ _settings: Optional[Settings] = None
 
 
 def get_settings() -> Settings:
-    """전역 Settings 싱글톤 반환."""
+    """
+    전역 Settings 싱글톤 인스턴스를 반환.
+
+    최초 호출 시 load_settings()를 통해 환경 변수에서 설정을 로드하고,
+    이후 호출에서는 이미 생성된 동일 인스턴스를 재사용합니다.
+    Returns: 애플리케이션 전역에서 공유되는 Settings 인스턴스.
+    """
     global _settings
     if _settings is None:
         _settings = load_settings()

@@ -1,4 +1,10 @@
-"""샘플 테스트 데이터 생성 스크립트."""
+"""
+테스트 및 데모용 샘플 데이터를 sample_data/ 디렉토리에 생성하는 스크립트.
+
+openpyxl로 2시트(제품목록, 재고현황) Excel 파일을 생성하고,
+PDF 1.4 원시 바이너리를 직접 작성하여 2페이지짜리 샘플 보고서 PDF를 생성합니다.
+외부 데이터 없이 DataBridge 파이프라인을 테스트할 수 있도록 합니다.
+"""
 
 import os
 import sys
@@ -9,7 +15,13 @@ SAMPLE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 
 
 def generate_excel():
-    """2시트 Excel 샘플 생성."""
+    """
+    openpyxl을 사용하여 2개 시트가 있는 샘플 Excel 파일을 생성.
+
+    시트1(제품목록): 제품코드, 제품명, 카테고리, 가격 5행.
+    시트2(재고현황): 제품코드, 창고, 수량, 최종입고일 5행.
+    sample_data/products_sample.xlsx로 저장됩니다.
+    """
     import openpyxl
 
     wb = openpyxl.Workbook()
@@ -39,7 +51,13 @@ def generate_excel():
 
 
 def generate_pdf():
-    """pypdf로 읽을 수 있는 최소 PDF를 바이너리로 직접 생성."""
+    """
+    PDF 1.4 규격의 원시 바이너리를 직접 작성하여 2페이지 샘플 PDF를 생성.
+
+    Helvetica 폰트를 사용한 영문 텍스트로 구성되며, pypdf로 파싱 가능합니다.
+    페이지1: Summary 섹션, 페이지2: Recommendations 섹션.
+    sample_data/sample_report.pdf로 저장됩니다.
+    """
     content = """%PDF-1.4
 1 0 obj
 << /Type /Catalog /Pages 2 0 R >>

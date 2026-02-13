@@ -1,0 +1,314 @@
+"""
+질의 라우팅 오케스트레이터 모듈 — 사용자 질의를 의도에 따라 적절한 에이전트로 라우팅.
+
+DataBridge AI 에이전트의 진입점(entry point)입니다. 사용자의 자연어 질의를 분석하여
+데이터 조회(SQL), 문서 검색(RAG), 또는 복합(두 에이전트 모두 호출) 의도로 분류한 뒤
+해당 에이전트를 호출합니다.
+
+의도 분류는 2단계 하이브리드 방식으로 동작합니다:
+1. **규칙 기반 (빠른 경로)**: 키워드 점수 + 카탈로그 테이블명/문서명 매칭.
+   점수 차이가 확실하면 LLM 호출 없이 즉시 분류합니다.
+2. **LLM 폴백 (느린 경로)**: 규칙 기반으로 판단이 모호하면 Ollama LLM에
+   DATA/DOCUMENT/BOTH 분류를 요청합니다.
+
+이 2단계 접근으로 대부분의 질의를 LLM 호출 없이 빠르게 분류하면서,
+모호한 경우에만 LLM을 사용하여 비용과 지연을 최소화합니다.
+
+의존 모듈:
+    - agent.sql_agent: process() — SQL 에이전트 파이프라인
+    - agent.doc_agent: process() — 문서 에이전트 파이프라인
+    - agent._llm: generate() — LLM 호출 (의도 분류 폴백용)
+    - agent._audit: log_action() — 감사 로그 기록
+    - agent.tools.list_tables: get_table_names() — 카탈로그 테이블명 조회
+    - agent.tools.search_docs: get_document_names() — 카탈로그 문서명 조회
+
+사용 예시:
+    from agent.orchestrator import process_query
+    result = process_query("sales 테이블에서 총 매출 보여줘")
+    print(result["intent"])   # "data"
+    print(result["answer"])   # "총 매출은 1,234,000원입니다."
+"""
+
+import logging
+
+from agent._llm import generate
+from agent._audit import log_action
+from agent.tools.list_tables import get_table_names
+from agent.tools.search_docs import get_document_names
+from agent import sql_agent, doc_agent
+
+logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------
+# 규칙 기반 의도 분류를 위한 키워드 사전
+# --------------------------------------------------------------------------
+
+# 데이터 조회(SQL) 의도를 나타내는 키워드들.
+# 점수가 높을수록 해당 의도일 확률이 높습니다.
+_DATA_KEYWORDS: dict[str, int] = {
+    # SQL 관련 동사/명사
+    "조회": 3, "쿼리": 3, "query": 3, "select": 3,
+    "테이블": 2, "table": 2, "컬럼": 2, "column": 2,
+    "데이터": 2, "data": 2, "행": 1, "row": 1,
+    # 집계 관련
+    "합계": 2, "평균": 2, "최대": 2, "최소": 2, "개수": 2,
+    "sum": 2, "avg": 2, "max": 2, "min": 2, "count": 2,
+    "총": 2, "전체": 1, "통계": 2,
+    # 정렬/필터
+    "정렬": 1, "필터": 1, "그룹": 1, "상위": 1, "하위": 1,
+    "order": 1, "group": 1, "where": 2, "limit": 1,
+    # 데이터 분석
+    "매출": 2, "주문": 2, "판매": 2, "재고": 2, "수량": 1,
+}
+
+# 문서 검색(RAG) 의도를 나타내는 키워드들.
+_DOC_KEYWORDS: dict[str, int] = {
+    # 문서 관련
+    "문서": 3, "document": 3, "보고서": 3, "report": 3,
+    "파일": 2, "file": 2, "pdf": 3, "PDF": 3,
+    "가이드": 2, "매뉴얼": 2, "manual": 2, "guide": 2,
+    # 검색/내용 관련
+    "검색": 2, "search": 2, "찾아": 2, "내용": 2,
+    "요약": 2, "설명": 2, "정리": 2, "분석": 1,
+    "어떤": 1, "무엇": 1, "왜": 1, "어떻게": 1,
+    # 텍스트 관련
+    "텍스트": 2, "본문": 2, "페이지": 2, "챕터": 2,
+}
+
+# 규칙 기반 분류의 확신 임계값.
+# |data_score - doc_score| >= _THRESHOLD이면 LLM 폴백 없이 분류합니다.
+_SCORE_THRESHOLD = 3
+
+# LLM 의도 분류용 시스템 프롬프트.
+_CLASSIFY_SYSTEM_PROMPT = """사용자의 질문 의도를 분류하세요.
+
+분류:
+- DATA: 데이터베이스 테이블에서 데이터를 조회/분석하는 질문 (SQL 필요)
+- DOCUMENT: 업로드된 문서(PDF, DOCX 등)에서 정보를 검색/요약하는 질문
+- BOTH: 데이터 조회와 문서 검색 모두 필요한 복합 질문
+
+반드시 DATA, DOCUMENT, BOTH 중 하나만 대문자로 응답하세요. 다른 텍스트를 추가하지 마세요.
+"""
+
+
+def process_query(question: str) -> dict:
+    """
+    사용자 자연어 질의의 의도를 분류하고 적절한 에이전트를 호출하여 응답을 반환.
+
+    처리 흐름:
+    1. classify_intent()로 의도를 "data", "document", "composite" 중 하나로 분류
+    2. 분류 결과를 audit_log에 기록
+    3. 의도에 따라 에이전트 호출:
+       - "data"      → sql_agent.process()
+       - "document"  → doc_agent.process()
+       - "composite" → 두 에이전트 모두 호출 후 결과 병합
+
+    Args:
+        question: 사용자의 자연어 질의.
+                  예: "sales 테이블에서 총 매출 보여줘"
+
+    Returns:
+        에이전트 처리 결과 딕셔너리. 각 에이전트의 결과 형식을 따르되,
+        추가로 "intent" 필드가 포함됩니다:
+        {
+            "intent": str,     — 분류된 의도 ("data", "document", "composite")
+            "success": bool,   — 처리 성공 여부
+            "answer": str,     — 사용자에게 표시할 응답
+            ...                — 에이전트별 추가 필드 (sql, data, sources 등)
+        }
+
+        composite(복합) 의도의 경우:
+        {
+            "intent": "composite",
+            "success": bool,
+            "answer": str,              — 두 결과를 합친 응답
+            "sql_result": dict | None,  — SQL 에이전트 결과
+            "doc_result": dict | None,  — 문서 에이전트 결과
+        }
+    """
+    intent = classify_intent(question)
+
+    log_action(
+        action_type="intent_classify",
+        query_text=question,
+        status="success",
+        metadata={"intent": intent},
+    )
+
+    logger.info(f"Query intent classified: intent={intent}, question='{question[:50]}...'")
+
+    if intent == "data":
+        result = sql_agent.process(question)
+        result["intent"] = "data"
+        return result
+
+    elif intent == "document":
+        result = doc_agent.process(question)
+        result["intent"] = "document"
+        return result
+
+    else:  # composite
+        return _process_composite(question)
+
+
+def classify_intent(question: str) -> str:
+    """
+    사용자 질의의 의도를 2단계 하이브리드 방식으로 분류.
+
+    1단계 — 규칙 기반 (빠른 경로):
+        - 질의에 포함된 키워드의 점수를 합산 (_DATA_KEYWORDS, _DOC_KEYWORDS)
+        - 카탈로그에 등록된 테이블명/문서명이 질의에 포함되어 있으면 가산점 부여
+        - 두 점수의 차이가 _SCORE_THRESHOLD(기본 3) 이상이면 즉시 분류
+
+    2단계 — LLM 폴백 (느린 경로):
+        - 1단계에서 판단이 모호한 경우(점수 차이 < _SCORE_THRESHOLD)
+        - Ollama LLM에 DATA/DOCUMENT/BOTH 분류를 요청
+        - LLM 응답에서 키워드를 추출하여 분류
+
+    Args:
+        question: 사용자의 자연어 질의.
+
+    Returns:
+        분류된 의도 문자열: "data", "document", 또는 "composite".
+    """
+    question_lower = question.lower()
+
+    # 1단계: 키워드 점수 계산
+    data_score = sum(
+        score for keyword, score in _DATA_KEYWORDS.items()
+        if keyword.lower() in question_lower
+    )
+    doc_score = sum(
+        score for keyword, score in _DOC_KEYWORDS.items()
+        if keyword.lower() in question_lower
+    )
+
+    # 카탈로그 매칭 가산점
+    table_names = get_table_names()
+    for name in table_names:
+        if name.lower() in question_lower:
+            data_score += 5  # 테이블명 매칭은 강력한 신호
+
+    doc_names = get_document_names()
+    for name in doc_names:
+        # 확장자 제거 후 매칭 (예: "report.pdf" → "report")
+        base_name = name.rsplit(".", 1)[0] if "." in name else name
+        if base_name.lower() in question_lower or name.lower() in question_lower:
+            doc_score += 5  # 문서명 매칭도 강력한 신호
+
+    logger.debug(f"Intent scores: data={data_score}, doc={doc_score}")
+
+    # 점수 차이가 확실하면 즉시 분류
+    score_diff = abs(data_score - doc_score)
+    if score_diff >= _SCORE_THRESHOLD:
+        if data_score > doc_score:
+            return "data"
+        else:
+            return "document"
+
+    # 한쪽만 점수가 있는 경우
+    if data_score > 0 and doc_score == 0:
+        return "data"
+    if doc_score > 0 and data_score == 0:
+        return "document"
+
+    # 2단계: LLM 폴백
+    return _classify_with_llm(question)
+
+
+def _classify_with_llm(question: str) -> str:
+    """
+    LLM을 사용하여 질의 의도를 DATA/DOCUMENT/BOTH로 분류.
+
+    Ollama LLM에 분류 프롬프트를 전달하고, 응답에서 DATA/DOCUMENT/BOTH 키워드를
+    추출합니다. LLM 호출 실패 또는 인식 불가 시 기본값 "data"를 반환합니다.
+
+    Args:
+        question: 사용자의 자연어 질의.
+
+    Returns:
+        분류된 의도: "data", "document", 또는 "composite".
+    """
+    response = generate(
+        prompt=f"사용자 질문: {question}",
+        system=_CLASSIFY_SYSTEM_PROMPT,
+        temperature=0.0,
+        timeout=15,
+    )
+
+    if not response:
+        logger.warning("LLM intent classification failed, defaulting to 'data'")
+        return "data"
+
+    response_upper = response.strip().upper()
+
+    if "BOTH" in response_upper:
+        return "composite"
+    elif "DOCUMENT" in response_upper:
+        return "document"
+    elif "DATA" in response_upper:
+        return "data"
+    else:
+        logger.warning(
+            f"LLM intent classification unclear: '{response}', defaulting to 'data'"
+        )
+        return "data"
+
+
+def _process_composite(question: str) -> dict:
+    """
+    복합(composite) 의도 질의를 처리하여 SQL 에이전트와 문서 에이전트 결과를 병합.
+
+    두 에이전트를 순차적으로 호출하고, 각각의 결과를 합쳐 하나의 응답으로 구성합니다.
+    한쪽 에이전트가 실패해도 다른 쪽의 결과는 정상적으로 포함됩니다.
+
+    Args:
+        question: 사용자의 자연어 질의.
+
+    Returns:
+        복합 결과 딕셔너리:
+        {
+            "intent": "composite",
+            "success": bool,           — 하나 이상의 에이전트가 성공했는지
+            "answer": str,             — 두 결과를 합친 응답
+            "sql_result": dict | None, — SQL 에이전트 결과
+            "doc_result": dict | None, — 문서 에이전트 결과
+        }
+    """
+    sql_result = sql_agent.process(question)
+    doc_result = doc_agent.process(question)
+
+    # 두 결과를 합쳐서 응답 구성
+    answer_parts = []
+
+    if sql_result["success"] and sql_result.get("answer"):
+        answer_parts.append(f"📊 데이터 조회 결과:\n{sql_result['answer']}")
+
+    if doc_result["success"] and doc_result.get("answer"):
+        answer_parts.append(f"📄 문서 검색 결과:\n{doc_result['answer']}")
+
+    if not answer_parts:
+        combined_answer = "데이터 조회와 문서 검색 모두 결과를 얻지 못했습니다."
+    else:
+        combined_answer = "\n\n---\n\n".join(answer_parts)
+
+    overall_success = sql_result["success"] or doc_result["success"]
+
+    log_action(
+        action_type="composite_result",
+        query_text=question,
+        result_summary=combined_answer[:500],
+        status="success" if overall_success else "failed",
+        metadata={
+            "sql_success": sql_result["success"],
+            "doc_success": doc_result["success"],
+        },
+    )
+
+    return {
+        "intent": "composite",
+        "success": overall_success,
+        "answer": combined_answer,
+        "sql_result": sql_result,
+        "doc_result": doc_result,
+    }
