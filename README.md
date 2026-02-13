@@ -278,6 +278,7 @@ MCP와 Open WebUI는 "질문하면 답해주는" 도구입니다.
 | **디스크** | 50 GB 이상 | 데이터 규모에 따라 |
 | **GPU** | 없어도 됩니다 | 있으면 응답이 빨라짐 |
 | **Docker** | Docker Compose v2.20+ | |
+| **Ollama** | v0.3 이상 | https://ollama.com/download |
 | **네트워크** | 사내망 접근 가능 | 인터넷 불필요 (설치 후) |
 
 ### 설치
@@ -292,11 +293,12 @@ cp .env.example .env
 vi .env
 # WATCH_DIR=/mnt/shared/data   ← 공유 폴더 경로 지정
 
-# 3. 실행
-docker compose up -d
+# 3. Ollama 설치 및 모델 다운로드 (최초 1회)
+#    https://ollama.com/download 에서 OS에 맞는 버전 설치 후:
+ollama pull exaone3.5:7.8b          # 약 5GB
 
-# 4. AI 모델 다운로드 (최초 1회, 약 5GB)
-docker compose exec ollama ollama pull exaone3.5:7.8b
+# 4. 실행
+docker compose up -d
 ```
 
 ### 접속
@@ -530,14 +532,17 @@ agentic-data-factory/
 
 ### 사용하는 기술
 
-서버 안에서 Docker 컨테이너 4개가 실행됩니다.
+서버 안에서 Docker 컨테이너 3개 + Ollama(로컬)가 실행됩니다.
 
-| 컨테이너 | 역할 | 비고 |
+| 구성 요소 | 역할 | 실행 방식 |
 |---|---|---|
-| **App** | 파일 감시 + AI 에이전트 + 승인 + 채팅 UI | Python |
-| **PostgreSQL** | 정형 데이터 + 마트 + 감사 로그 | 경량 DB |
-| **ChromaDB** | 문서 검색용 저장소 | 경량 벡터 DB |
-| **Ollama** | AI 모델 실행 (사내망 안에서) | 로컬 LLM |
+| **App** | 파일 감시 + AI 에이전트 + 승인 + 채팅 UI | Docker 컨테이너 |
+| **PostgreSQL** | 정형 데이터 + 마트 + 감사 로그 | Docker 컨테이너 |
+| **ChromaDB** | 문서 검색용 저장소 | Docker 컨테이너 |
+| **Ollama** | AI 모델 실행 (사내망 안에서) | 로컬 설치 |
+
+> 💡 Ollama는 메모리 절약을 위해 Docker 외부에서 로컬로 실행합니다.
+> 설치: https://ollama.com/download
 
 ---
 
@@ -554,7 +559,8 @@ POSTGRES_DB=adf
 POSTGRES_USER=adf
 POSTGRES_PASSWORD=changeme         # 반드시 변경하세요
 
-# === AI 모델 ===
+# === AI 모델 (Ollama 로컬 설치 필요) ===
+OLLAMA_HOST=http://localhost:11434 # Ollama 서버 주소
 LLM_MODEL=exaone3.5:7.8b          # 한국어 최적 모델
 # LLM_MODEL=qwen2.5:7b            # 대안
 

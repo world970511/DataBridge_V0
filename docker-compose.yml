@@ -36,28 +36,6 @@ services:
       timeout: 5s
       retries: 5
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: databridge-ollama
-    restart: unless-stopped
-    ports:
-      - "${OLLAMA_PORT:-11434}:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    # GPU가 있으면 docker-compose.gpu.yml로 override하여 사용
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-    healthcheck:
-      test: ["CMD-SHELL", "ollama list || exit 0"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   app:
     build:
       context: .
@@ -69,8 +47,6 @@ services:
         condition: service_healthy
       chromadb:
         condition: service_healthy
-      ollama:
-        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -81,7 +57,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin1234}
       CHROMA_HOST: chromadb
       CHROMA_PORT: 8000
-      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_HOST: http://host.docker.internal:${OLLAMA_PORT:-11434}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin1234}
       SECRET_KEY: ${SECRET_KEY:-databridge-secret-key-change-me}
     ports:
@@ -98,5 +74,4 @@ services:
 volumes:
   postgres_data:
   chroma_data:
-  ollama_data:
   app_logs:

@@ -40,7 +40,7 @@ class ChromaConfig:
 
 @dataclass
 class OllamaConfig:
-    host: str = "http://ollama:11434"
+    host: str = "http://localhost:11434"
     model: str = "exaone3.5:7.8b"
 
 
@@ -107,7 +107,7 @@ def load_settings() -> Settings:
     )
 
     ollama = OllamaConfig(
-        host=os.getenv("OLLAMA_HOST", "http://ollama:11434"),
+        host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         model=os.getenv("LLM_MODEL", "exaone3.5:7.8b"),
     )
 

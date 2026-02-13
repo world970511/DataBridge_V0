@@ -23,13 +23,14 @@ pip install -r requirements.txt
 통합 테스트(`@pytest.mark.integration`)는 Docker 서비스가 필요합니다:
 
 ```bash
-docker compose up -d postgres chromadb ollama
+docker compose up -d postgres chromadb
+# Ollama는 로컬에서 별도 실행: ollama serve
 ```
 
 서비스 확인:
 - PostgreSQL: `localhost:5432` (user: adf, password: changeme, db: adf)
 - ChromaDB: `localhost:8000`
-- Ollama: `localhost:11434`
+- Ollama: `localhost:11434` (로컬 설치 — `ollama serve`로 실행)
 
 ## 테스트 실행
 
@@ -183,7 +184,7 @@ orchestrator.process_query()
 
 | 변수명 | 기본값 | 설명 |
 |--------|--------|------|
-| `OLLAMA_HOST` | `http://ollama:11434` | Ollama 서버 주소 |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama 서버 주소 (로컬 설치) |
 | `LLM_MODEL` | `exaone3.5:7.8b` | 사용 LLM 모델 |
 | `AGENT_MAX_QUERY_ROWS` | `5000` | SELECT 최대 반환 행 수 |
 | `AGENT_QUERY_TIMEOUT` | `30` | SQL 실행 타임아웃 (초) |

@@ -40,7 +40,7 @@ def render_chat_page():
     """
     _init_chat_state()
 
-    st.title("💬 DataBridge Chat")
+    st.title("💬 Chat")
     st.caption("자연어로 데이터를 조회하거나 문서를 검색하세요.")
 
     # 기존 채팅 이력 표시
