@@ -1,21 +1,22 @@
 """
-문서 검색(RAG) 에이전트 모듈 — 자연어 질의로 문서를 검색하고 LLM이 답변을 생성.
+문서 검색(RAG) 에이전트 모듈 — 2-Tier 하이브리드 방식으로 문서를 검색하고 답변 생성.
 
 사용자의 문서 관련 질의를 처리하는 에이전트입니다. 다음 파이프라인으로 동작합니다:
 
-1. **문서 검색**: search_docs.search()로 ChromaDB에서 쿼리와 의미적으로 유사한
-   문서 청크를 코사인 유사도 기반으로 검색합니다.
-2. **컨텍스트 구성**: 검색된 청크들을 search_docs.format_search_results()로
-   LLM에 전달하기 적합한 텍스트로 포맷팅합니다.
-3. **RAG 응답 생성**: Ollama LLM에 검색된 문서 컨텍스트와 질의를 함께 전달하여
-   근거 기반의 자연어 답변을 생성합니다 (Retrieval-Augmented Generation).
+1. **Tier 1 검색**: ChromaDB에 저장된 문서 요약 임베딩에서 관련 문서를 식별합니다.
+2. **Tier 2 온디맨드 파싱**: 식별된 문서의 원본 파일을 전체 파싱하여
+   LLM 컨텍스트로 사용합니다 (500자 청크가 아닌 전체 텍스트).
+3. **RAG 응답 생성**: 전체 문서 텍스트와 질의를 LLM에 전달하여
+   근거 기반의 자연어 답변을 생성합니다.
 
-모든 단계에서 _audit.log_action()으로 감사 로그를 기록합니다.
+파일이 디스크에서 삭제된 경우 요약 텍스트를 폴백으로 사용합니다.
 
 의존 모듈:
     - agent._llm: generate() — Ollama LLM 호출
     - agent._audit: log_action() — 감사 로그 기록
     - agent.tools.search_docs: search(), format_search_results() — 문서 검색·포맷
+    - catalog.catalog: get_document_by_name() — 문서 경로 조회
+    - watcher.loader.document_loader: extract_text() — 온디맨드 텍스트 추출
 
 사용 예시:
     from agent.doc_agent import process
@@ -25,6 +26,7 @@
 """
 
 import logging
+from pathlib import Path
 
 from agent._llm import generate
 from agent._audit import log_action
@@ -33,7 +35,6 @@ from agent.tools.search_docs import search, format_search_results
 logger = logging.getLogger(__name__)
 
 # RAG 응답 생성을 위한 시스템 프롬프트.
-# 검색된 문서 컨텍스트를 참고하여 답변하도록 지시합니다.
 _RAG_SYSTEM_PROMPT = """당신은 문서 분석 전문가입니다.
 제공된 문서 내용을 바탕으로 사용자의 질문에 정확하게 답변합니다.
 
@@ -45,23 +46,26 @@ _RAG_SYSTEM_PROMPT = """당신은 문서 분석 전문가입니다.
 - 한국어로 자연스럽게 답변합니다
 """
 
+# 온디맨드 파싱 시 LLM에 전달할 문서당 최대 문자 수
+_MAX_FULL_TEXT_CHARS = 5000
+
+# 온디맨드 파싱할 최대 문서 수 (토큰 절약)
+_MAX_DOCUMENTS = 3
+
 
 def process(question: str, n_results: int = 5) -> dict:
     """
-    자연어 질의로 문서를 검색하고 LLM으로 RAG 기반 답변을 생성하는 전체 파이프라인.
+    Tier 2: 요약 검색으로 관련 문서를 식별한 뒤, 원본 파일을 온디맨드 파싱하여 RAG 응답 생성.
 
     처리 흐름:
-    1. 사용자 질의를 audit_log에 기록 (action_type='query')
-    2. ChromaDB에서 의미적으로 유사한 문서 청크 검색
-    3. 검색 결과가 있으면 LLM에 컨텍스트와 함께 전달하여 답변 생성 (RAG)
-    4. 검색 결과가 없으면 안내 메시지 반환
-    5. 각 단계의 결과를 audit_log에 기록
+    1. ChromaDB에서 요약 임베딩 검색 → 관련 문서 식별
+    2. 각 문서의 원본 파일을 온디맨드 파싱하여 전체 텍스트 추출
+    3. 전체 텍스트를 LLM에 전달하여 RAG 기반 답변 생성
+    4. 파일 부재 시 요약 텍스트 폴백
 
     Args:
         question: 사용자의 자연어 문서 검색 질의.
-                  예: "보고서에서 주요 리스크 요인을 정리해 줘"
         n_results: ChromaDB에서 검색할 최대 청크 수. 기본값 5.
-                   많을수록 컨텍스트가 풍부해지지만 LLM 토큰 사용량이 증가합니다.
 
     Returns:
         처리 결과 딕셔너리:
@@ -69,7 +73,6 @@ def process(question: str, n_results: int = 5) -> dict:
             "success": bool,         — 전체 파이프라인 성공 여부
             "answer": str,           — 사용자에게 표시할 자연어 응답
             "sources": list[dict],   — 참조된 문서 출처 정보
-                                       [{"source": "파일명", "similarity": 0.87}, ...]
             "search_count": int,     — 검색된 문서 청크 수
             "agent": "document",     — 처리한 에이전트 식별자
         }
@@ -77,7 +80,7 @@ def process(question: str, n_results: int = 5) -> dict:
     # 1. 질의 접수 로그
     log_action(action_type="query", query_text=question)
 
-    # 2. ChromaDB 문서 검색
+    # 2. ChromaDB 요약 임베딩 검색 (Tier 1 결과 활용)
     results = search(query=question, n_results=n_results)
 
     log_action(
@@ -97,10 +100,29 @@ def process(question: str, n_results: int = 5) -> dict:
             "agent": "document",
         }
 
-    # 3. 검색 결과를 텍스트로 포맷팅
-    context_text = format_search_results(results)
+    # 3. 고유 문서 식별 (중복 제거, 유사도 내림차순)
+    unique_sources = _extract_unique_sources(results)
 
-    # 4. LLM으로 RAG 응답 생성
+    # 4. 온디맨드 파싱: 각 문서의 전체 텍스트 추출
+    full_texts = []
+    for source_info in unique_sources[:_MAX_DOCUMENTS]:
+        file_text = _load_full_text(source_info["source"])
+        if file_text:
+            full_texts.append({
+                "source": source_info["source"],
+                "text": file_text[:_MAX_FULL_TEXT_CHARS],
+                "similarity": source_info["similarity"],
+            })
+
+    # 5. 컨텍스트 구성 (전체 텍스트 또는 요약 폴백)
+    if full_texts:
+        context_text = _format_full_texts(full_texts)
+    else:
+        # 파일이 모두 삭제된 경우, 요약 텍스트라도 사용
+        logger.warning("All source files missing, falling back to summary text")
+        context_text = format_search_results(results)
+
+    # 6. LLM으로 RAG 응답 생성
     rag_prompt = (
         f"다음은 검색된 관련 문서 내용입니다:\n\n"
         f"{context_text}\n\n"
@@ -114,13 +136,12 @@ def process(question: str, n_results: int = 5) -> dict:
     )
 
     if not answer:
-        # LLM 호출 실패 시 검색 결과만 직접 제공
         answer = (
             "LLM 응답 생성에 실패했습니다. 검색된 문서 내용을 직접 확인해 주세요:\n\n"
             f"{context_text}"
         )
 
-    # 5. 출처 정보 추출
+    # 7. 출처 정보
     sources = _extract_sources(results)
 
     log_action(
@@ -140,15 +161,96 @@ def process(question: str, n_results: int = 5) -> dict:
     }
 
 
+def _extract_unique_sources(results: list[dict]) -> list[dict]:
+    """
+    검색 결과에서 중복 없는 source 파일 목록을 추출하여 유사도 내림차순 정렬.
+
+    동일 source에서 여러 청크가 검색될 수 있으므로 가장 높은 유사도를 대표값으로 사용합니다.
+
+    Returns: [{"source": 파일명, "similarity": 유사도}, ...] 리스트.
+    """
+    source_map: dict[str, float] = {}
+
+    for result in results:
+        metadata = result.get("metadata", {})
+        source = metadata.get("source", "")
+        if not source:
+            continue
+        distance = result.get("distance")
+        similarity = max(0.0, 1.0 - distance) if distance is not None else 0.0
+
+        if source not in source_map or similarity > source_map[source]:
+            source_map[source] = similarity
+
+    sources = [
+        {"source": src, "similarity": sim}
+        for src, sim in source_map.items()
+    ]
+    sources.sort(key=lambda x: x["similarity"], reverse=True)
+    return sources
+
+
+def _load_full_text(source_name: str) -> str:
+    """
+    문서 파일명으로 카탈로그에서 경로를 조회하고 전체 텍스트를 온디맨드 추출.
+
+    카탈로그에 문서가 없거나 파일이 디스크에 존재하지 않으면 빈 문자열을 반환합니다.
+
+    Args:
+        source_name: 문서 파일명 (ChromaDB metadata의 source 값).
+
+    Returns: 전체 문서 텍스트 문자열. 실패 시 빈 문자열.
+    """
+    try:
+        from catalog.catalog import get_document_by_name
+        from watcher.loader.document_loader import extract_text
+
+        doc_info = get_document_by_name(source_name)
+        if not doc_info:
+            logger.warning(f"Document not found in catalog: {source_name}")
+            return ""
+
+        file_path = doc_info.get("source_file", "")
+        file_type = doc_info.get("file_type", "")
+
+        if not file_path or not Path(file_path).is_file():
+            logger.warning(f"Source file missing from disk: {file_path}")
+            return ""
+
+        text = extract_text(file_path, file_type)
+        logger.debug(f"On-demand parsed '{source_name}': {len(text)} chars")
+        return text
+
+    except Exception as e:
+        logger.error(f"Failed to load full text for '{source_name}': {e}")
+        return ""
+
+
+def _format_full_texts(full_texts: list[dict]) -> str:
+    """
+    온디맨드 파싱된 전체 텍스트를 LLM 컨텍스트 형식으로 포맷팅.
+
+    Args:
+        full_texts: [{"source": 파일명, "text": 텍스트, "similarity": 유사도}] 리스트.
+
+    Returns: 포맷팅된 텍스트 문자열.
+    """
+    parts = []
+    for idx, item in enumerate(full_texts, 1):
+        similarity = item.get("similarity", 0)
+        parts.append(
+            f"[문서 {idx}] (출처: {item['source']}, 유사도: {similarity:.2f})\n"
+            f"{item['text']}"
+        )
+    return "\n\n".join(parts)
+
+
 def _extract_sources(results: list[dict]) -> list[dict]:
     """
     검색 결과에서 출처(source)와 유사도(similarity) 정보를 추출하여 중복 제거.
 
     동일한 source 파일에서 여러 청크가 검색될 수 있으므로, source 기준으로
     중복을 제거하고 가장 높은 유사도를 대표값으로 사용합니다.
-
-    Args:
-        results: search() 함수가 반환한 딕셔너리 리스트.
 
     Returns:
         중복 제거된 출처 정보 리스트. 유사도 내림차순 정렬.
@@ -163,7 +265,6 @@ def _extract_sources(results: list[dict]) -> list[dict]:
 
         similarity = max(0.0, 1.0 - distance) if distance is not None else 0.0
 
-        # 동일 출처에서 가장 높은 유사도를 유지
         if source not in source_map or similarity > source_map[source]:
             source_map[source] = similarity
 
@@ -172,7 +273,6 @@ def _extract_sources(results: list[dict]) -> list[dict]:
         for src, sim in source_map.items()
     ]
 
-    # 유사도 내림차순 정렬
     sources.sort(key=lambda x: x["similarity"], reverse=True)
 
     return sources

@@ -38,13 +38,18 @@ CREATE TABLE IF NOT EXISTS catalog_tables (
 CREATE TABLE IF NOT EXISTS catalog_documents (
     id              SERIAL PRIMARY KEY,
     doc_name        VARCHAR(500) NOT NULL,
-    source_file     TEXT NOT NULL,
+    source_file     TEXT NOT NULL UNIQUE,
     file_type       VARCHAR(50),
     chunk_count     INTEGER DEFAULT 0,
     collection_name VARCHAR(255),
+    summary_text    TEXT,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- 기존 배포 마이그레이션:
+-- ALTER TABLE catalog_documents ADD COLUMN IF NOT EXISTS summary_text TEXT;
+-- ALTER TABLE catalog_documents ADD CONSTRAINT uq_catalog_documents_source_file UNIQUE (source_file);
 
 -- ============================================
 -- 2. 감사 로그 (모든 질의/승인/실행 이력)
@@ -135,7 +140,7 @@ CREATE TABLE IF NOT EXISTS file_process_log (
     file_type       VARCHAR(50),
     file_size       BIGINT,
     action          VARCHAR(50) NOT NULL,
-    -- load_to_db, register_for_search, ignore, error
+    -- load_to_db, register_for_search, delete, ignore, error
     target_table    VARCHAR(255),
     status          VARCHAR(20) DEFAULT 'success',
     -- success, failed, processing
