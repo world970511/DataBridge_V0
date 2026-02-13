@@ -26,7 +26,7 @@ import logging
 import re
 
 from config.settings import get_settings
-from db.connection import get_cursor
+from db.connection import get_cursor, execute_command
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +179,62 @@ def execute_select(sql: str) -> dict:
             "data": [],
             "row_count": 0,
             "truncated": False,
+            "error": error_msg,
+            "sql": sql,
+        }
+
+
+def execute_write(sql: str) -> dict:
+    """
+    승인된 쓰기 SQL(INSERT, CREATE, UPDATE 등)을 실행.
+
+    approval_manager를 통해 승인된 SQL만 이 함수로 실행해야 합니다.
+    직접 호출은 보안 위험이 있으므로, 반드시 승인 워크플로우를 거쳐야 합니다.
+
+    SELECT 쿼리는 execute_select()를 사용해야 하며, 이 함수는 거부합니다.
+    주석과 다중 문장도 차단합니다.
+
+    Args:
+        sql: 실행할 쓰기 SQL 문자열.
+
+    Returns:
+        실행 결과 딕셔너리:
+        {
+            "success": bool,         — 실행 성공 여부
+            "rows_affected": int,    — 영향받은 행 수
+            "error": str | None,     — 에러 메시지 (성공 시 None)
+            "sql": str,              — 실행된 SQL
+        }
+    """
+    if not sql or not sql.strip():
+        return {"success": False, "rows_affected": 0, "error": "SQL이 비어 있습니다.", "sql": sql}
+
+    cleaned = sql.strip()
+
+    # 주석 차단
+    if _COMMENT_PATTERN.search(cleaned):
+        return {"success": False, "rows_affected": 0, "error": "SQL 주석은 허용되지 않습니다.", "sql": sql}
+
+    # 다중 문장 차단
+    sql_body = cleaned.rstrip(";").strip()
+    if ";" in sql_body:
+        return {"success": False, "rows_affected": 0, "error": "다중 SQL 문은 허용되지 않습니다.", "sql": sql}
+
+    try:
+        affected = execute_command(sql)
+        logger.info(f"Write SQL executed: {affected} rows affected")
+        return {
+            "success": True,
+            "rows_affected": affected,
+            "error": None,
+            "sql": sql,
+        }
+    except Exception as e:
+        error_msg = str(e).strip()
+        logger.error(f"Write SQL execution failed: {error_msg}")
+        return {
+            "success": False,
+            "rows_affected": 0,
             "error": error_msg,
             "sql": sql,
         }

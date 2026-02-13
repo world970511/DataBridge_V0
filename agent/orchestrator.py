@@ -91,7 +91,7 @@ _CLASSIFY_SYSTEM_PROMPT = """사용자의 질문 의도를 분류하세요.
 """
 
 
-def process_query(question: str) -> dict:
+def process_query(question: str, user_id: str = "system") -> dict:
     """
     사용자 자연어 질의의 의도를 분류하고 적절한 에이전트를 호출하여 응답을 반환.
 
@@ -99,13 +99,15 @@ def process_query(question: str) -> dict:
     1. classify_intent()로 의도를 "data", "document", "composite" 중 하나로 분류
     2. 분류 결과를 audit_log에 기록
     3. 의도에 따라 에이전트 호출:
-       - "data"      → sql_agent.process()
-       - "document"  → doc_agent.process()
+       - "data"      → sql_agent.process(question, user_id)
+       - "document"  → doc_agent.process(question)
        - "composite" → 두 에이전트 모두 호출 후 결과 병합
 
     Args:
         question: 사용자의 자연어 질의.
                   예: "sales 테이블에서 총 매출 보여줘"
+        user_id: 요청한 사용자의 username. 기본값 'system'.
+                 SQL 에이전트에서 승인 요청 생성 시 요청자로 기록됩니다.
 
     Returns:
         에이전트 처리 결과 딕셔너리. 각 에이전트의 결과 형식을 따르되,
@@ -132,13 +134,14 @@ def process_query(question: str) -> dict:
         action_type="intent_classify",
         query_text=question,
         status="success",
+        user_id=user_id,
         metadata={"intent": intent},
     )
 
     logger.info(f"Query intent classified: intent={intent}, question='{question[:50]}...'")
 
     if intent == "data":
-        result = sql_agent.process(question)
+        result = sql_agent.process(question, user_id=user_id)
         result["intent"] = "data"
         return result
 
@@ -148,7 +151,7 @@ def process_query(question: str) -> dict:
         return result
 
     else:  # composite
-        return _process_composite(question)
+        return _process_composite(question, user_id=user_id)
 
 
 def classify_intent(question: str) -> str:
@@ -255,7 +258,7 @@ def _classify_with_llm(question: str) -> str:
         return "data"
 
 
-def _process_composite(question: str) -> dict:
+def _process_composite(question: str, user_id: str = "system") -> dict:
     """
     복합(composite) 의도 질의를 처리하여 SQL 에이전트와 문서 에이전트 결과를 병합.
 
@@ -264,6 +267,7 @@ def _process_composite(question: str) -> dict:
 
     Args:
         question: 사용자의 자연어 질의.
+        user_id: 요청한 사용자의 username.
 
     Returns:
         복합 결과 딕셔너리:
@@ -275,7 +279,7 @@ def _process_composite(question: str) -> dict:
             "doc_result": dict | None, — 문서 에이전트 결과
         }
     """
-    sql_result = sql_agent.process(question)
+    sql_result = sql_agent.process(question, user_id=user_id)
     doc_result = doc_agent.process(question)
 
     # 두 결과를 합쳐서 응답 구성

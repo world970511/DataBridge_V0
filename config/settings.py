@@ -2,8 +2,8 @@
 DataBridge 설정 로딩 모듈.
 
 .env 파일 또는 시스템 환경 변수에서 설정값을 읽어와
-DatabaseConfig, ChromaConfig, OllamaConfig, AgentConfig, WatcherConfig
-다섯 개의 데이터클래스로 구성된 Settings 객체를 생성합니다.
+DatabaseConfig, ChromaConfig, OllamaConfig, AgentConfig, WatcherConfig, AuthConfig
+여섯 개의 데이터클래스로 구성된 Settings 객체를 생성합니다.
 load_settings()로 매번 새로 로드하거나, get_settings()로 싱글톤 인스턴스를
 사용하여 애플리케이션 전역에서 동일한 설정을 공유합니다.
 """
@@ -19,9 +19,9 @@ class DatabaseConfig:
     url: str = ""
     host: str = "postgres"
     port: int = 5432
-    name: str = "adf"
-    user: str = "adf"
-    password: str = "changeme"
+    name: str = "databridge"
+    user: str = "admin"
+    password: str = "admin1234"
 
     def __post_init__(self):
         if not self.url:
@@ -59,12 +59,27 @@ class WatcherConfig:
 
 
 @dataclass
+class AuthConfig:
+    """
+    인증 관련 설정.
+
+    admin_password: 관리자(admin) 계정의 초기 비밀번호. 앱 기동 시
+                    admin 계정이 없으면 이 비밀번호로 자동 생성됩니다.
+    secret_key: 세션 서명 등에 사용할 비밀 키. 기본값은 개발 환경용이며
+                프로덕션에서 반드시 변경해야 합니다.
+    """
+    admin_password: str = "admin1234"
+    secret_key: str = "databridge-secret-key-change-me"
+
+
+@dataclass
 class Settings:
     db: DatabaseConfig = field(default_factory=DatabaseConfig)
     chroma: ChromaConfig = field(default_factory=ChromaConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     watcher: WatcherConfig = field(default_factory=WatcherConfig)
+    auth: AuthConfig = field(default_factory=AuthConfig)
     app_port: int = 8501
     job_log_dir: str = "./logs/jobs"
 
@@ -81,9 +96,9 @@ def load_settings() -> Settings:
         url=os.getenv("DATABASE_URL", ""),
         host=os.getenv("POSTGRES_HOST", "postgres"),
         port=int(os.getenv("POSTGRES_PORT", "5432")),
-        name=os.getenv("POSTGRES_DB", "adf"),
-        user=os.getenv("POSTGRES_USER", "adf"),
-        password=os.getenv("POSTGRES_PASSWORD", "changeme"),
+        name=os.getenv("POSTGRES_DB", "databridge"),
+        user=os.getenv("POSTGRES_USER", "admin"),
+        password=os.getenv("POSTGRES_PASSWORD", "admin1234"),
     )
 
     chroma = ChromaConfig(
@@ -108,12 +123,18 @@ def load_settings() -> Settings:
         webhook_secret=os.getenv("WEBHOOK_SECRET", "changeme"),
     )
 
+    auth = AuthConfig(
+        admin_password=os.getenv("ADMIN_PASSWORD", "admin1234"),
+        secret_key=os.getenv("SECRET_KEY", "databridge-secret-key-change-me"),
+    )
+
     return Settings(
         db=db,
         chroma=chroma,
         ollama=ollama,
         agent=agent,
         watcher=watcher,
+        auth=auth,
         app_port=int(os.getenv("APP_PORT", "8501")),
         job_log_dir=os.getenv("JOB_LOG_DIR", "./logs/jobs"),
     )

@@ -39,13 +39,18 @@ def get_chroma_client() -> chromadb.HttpClient:
     return _client
 
 
-def store_chunks(chunks: list[Chunk], collection_name: str = "documents"):
+def store_chunks(
+    chunks: list[Chunk],
+    collection_name: str = "documents",
+    batch_size: int = 50,
+):
     """
     Chunk 리스트의 텍스트를 ChromaDB 컬렉션에 벡터 임베딩과 함께 저장.
 
     컬렉션이 없으면 코사인 유사도 기반 HNSW 인덱스로 자동 생성합니다.
     각 청크의 id, text(documents), metadata를 전달하면
     ChromaDB 내장 Sentence Transformers(all-MiniLM-L6-v2)가 자동으로 임베딩을 생성합니다.
+    대량 청크는 batch_size 단위로 분할하여 ChromaDB 메모리 부담을 줄입니다.
     빈 청크 리스트가 전달되면 아무 작업도 하지 않습니다.
     """
     if not chunks:
@@ -57,16 +62,19 @@ def store_chunks(chunks: list[Chunk], collection_name: str = "documents"):
         metadata={"hnsw:space": "cosine"},
     )
 
-    ids = [c.id for c in chunks]
-    documents = [c.text for c in chunks]
-    metadatas = [c.metadata for c in chunks]
+    # 배치 단위로 분할하여 임베딩 — 메모리 부족(OOM) 방지
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i : i + batch_size]
+        ids = [c.id for c in batch]
+        documents = [c.text for c in batch]
+        metadatas = [c.metadata for c in batch]
 
-    # ChromaDB는 기본 임베딩 함수를 내장 (Sentence Transformers)
-    collection.add(
-        ids=ids,
-        documents=documents,
-        metadatas=metadatas,
-    )
+        collection.add(
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
+        )
+        logger.debug(f"Stored batch {i // batch_size + 1}: {len(batch)} chunks")
 
     logger.info(f"Stored {len(chunks)} chunks in collection '{collection_name}'")
 

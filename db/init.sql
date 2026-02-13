@@ -2,6 +2,25 @@
 -- PostgreSQL 16
 
 -- ============================================
+-- 0. 사용자 관리 (인증/인가)
+-- ============================================
+CREATE TABLE IF NOT EXISTS users (
+    id              SERIAL PRIMARY KEY,
+    username        VARCHAR(100) NOT NULL UNIQUE,
+    password_hash   VARCHAR(256) NOT NULL,
+    salt            VARCHAR(64) NOT NULL,
+    role            VARCHAR(20) NOT NULL DEFAULT 'user',
+    -- 'admin' 또는 'user'
+    display_name    VARCHAR(200),
+    is_active       BOOLEAN DEFAULT TRUE,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+
+-- ============================================
 -- 1. 데이터 카탈로그 (테이블/문서 메타데이터)
 -- ============================================
 CREATE TABLE IF NOT EXISTS catalog_tables (
@@ -88,14 +107,18 @@ CREATE INDEX IF NOT EXISTS idx_job_history_started ON batch_job_history(started_
 CREATE TABLE IF NOT EXISTS approval_requests (
     id              SERIAL PRIMARY KEY,
     request_type    VARCHAR(50) NOT NULL,
-    -- create_mart, create_batch, delete_batch
+    -- sql_needs_approval, create_mart, create_batch, delete_batch
     title           VARCHAR(500),
     sql_text        TEXT NOT NULL,
+    sql_category    VARCHAR(30),
+    -- SAFE, AUTO_ALLOWED, NEEDS_APPROVAL, FORBIDDEN
     status          VARCHAR(20) DEFAULT 'pending',
-    -- pending, approved, denied
+    -- pending, approved, denied, executed
     requested_by    VARCHAR(100) DEFAULT 'system',
     reviewed_by     VARCHAR(100),
     reviewed_at     TIMESTAMPTZ,
+    result_summary  TEXT,
+    -- 실행 결과 요약 (execute 후 기록)
     metadata        JSONB,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );

@@ -1,21 +1,21 @@
-version: "3.8"
-
 services:
   postgres:
     image: postgres:16-alpine
     container_name: databridge-postgres
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-adf}
-      POSTGRES_USER: ${POSTGRES_USER:-adf}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-databridge}
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin1234}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-adf} -d ${POSTGRES_DB:-adf}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-databridge}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -44,15 +44,16 @@ services:
       - "${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama_data:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # GPU가 있으면 docker-compose.gpu.yml로 override하여 사용
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      test: ["CMD-SHELL", "ollama list || exit 0"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -73,14 +74,20 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-adf}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-adf}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-databridge}
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin1234}
       CHROMA_HOST: chromadb
       CHROMA_PORT: 8000
       OLLAMA_HOST: http://ollama:11434
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin1234}
+      SECRET_KEY: ${SECRET_KEY:-databridge-secret-key-change-me}
     ports:
       - "${APP_PORT:-8501}:8501"
     volumes:
-      - ${WATCH_DIR:-./sample_data}:/data:ro
+      - ${WATCH_DIR_HOST:-./sample_data}:/data:ro
       - app_logs:/app/logs
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]

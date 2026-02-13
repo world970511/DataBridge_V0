@@ -14,4 +14,4 @@ COPY . .
 
 EXPOSE 8501
 
-CMD ["python", "-m", "app.main"]
+CMD ["streamlit", "run", "ui/main_ui.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]

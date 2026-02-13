@@ -35,7 +35,11 @@ def get_pool() -> pool.SimpleConnectionPool:
         _pool = pool.SimpleConnectionPool(
             minconn=1,
             maxconn=10,
-            dsn=settings.db.url,
+            host=settings.db.host,
+            port=settings.db.port,
+            dbname=settings.db.name,
+            user=settings.db.user,
+            password=settings.db.password,
         )
         logger.info("PostgreSQL connection pool created")
     return _pool
