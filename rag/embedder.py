@@ -108,6 +108,38 @@ def search_documents(
     return output
 
 
+def delete_chunks(source: str, collection_name: str = "documents") -> int:
+    """
+    지정된 source(파일명)에 해당하는 모든 청크를 ChromaDB 컬렉션에서 삭제.
+
+    메타데이터의 source 필드가 일치하는 모든 임베딩을 제거합니다.
+    문서 재업로드 시 기존 요약 교체, 파일 삭제 시 고아 임베딩 정리에 사용됩니다.
+
+    Args:
+        source: 삭제할 문서의 source 메타데이터 값 (파일명).
+        collection_name: 대상 ChromaDB 컬렉션명. 기본값 "documents".
+
+    Returns:
+        삭제된 청크 수. 컬렉션이 없거나 해당 source가 없으면 0.
+    """
+    client = get_chroma_client()
+
+    try:
+        collection = client.get_collection(name=collection_name)
+    except Exception:
+        logger.warning(f"Collection '{collection_name}' not found for deletion")
+        return 0
+
+    existing = collection.get(where={"source": source})
+    count = len(existing["ids"]) if existing and existing["ids"] else 0
+
+    if count > 0:
+        collection.delete(where={"source": source})
+        logger.info(f"Deleted {count} chunks for source '{source}' from '{collection_name}'")
+
+    return count
+
+
 def check_chroma_connection() -> bool:
     """
     ChromaDB 서버에 heartbeat 요청을 보내 연결 상태를 확인.

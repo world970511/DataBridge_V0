@@ -111,22 +111,29 @@ def register_document(
     file_type: str,
     chunk_count: int,
     collection_name: str,
+    summary_text: Optional[str] = None,
 ):
     """
-    문서 메타데이터를 catalog_documents 테이블에 등록.
+    문서 메타데이터를 catalog_documents에 UPSERT(INSERT 또는 UPDATE).
 
-    동일한 문서가 이미 등록되어 있으면 ON CONFLICT DO NOTHING으로 무시합니다.
-    doc_name(문서명), 원본 파일 경로, 파일 유형, 청크 수, ChromaDB 컬렉션명을 저장합니다.
+    동일한 source_file이 이미 존재하면 메타데이터를 갱신하고
+    updated_at을 현재 시각으로 업데이트합니다. 재업로드 시 요약 정보도 갱신됩니다.
     """
     with get_cursor() as cur:
         cur.execute(
             """
             INSERT INTO catalog_documents
-                (doc_name, source_file, file_type, chunk_count, collection_name)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT DO NOTHING
+                (doc_name, source_file, file_type, chunk_count, collection_name, summary_text)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (source_file) DO UPDATE SET
+                doc_name = EXCLUDED.doc_name,
+                file_type = EXCLUDED.file_type,
+                chunk_count = EXCLUDED.chunk_count,
+                collection_name = EXCLUDED.collection_name,
+                summary_text = EXCLUDED.summary_text,
+                updated_at = NOW()
             """,
-            (doc_name, source_file, file_type, chunk_count, collection_name),
+            (doc_name, source_file, file_type, chunk_count, collection_name, summary_text),
         )
     logger.info(f"Document registered in catalog: {doc_name}")
 
@@ -144,6 +151,60 @@ def list_documents() -> list[dict]:
         FROM catalog_documents
         ORDER BY created_at DESC
         """
+    )
+
+
+def get_document_by_name(doc_name: str) -> Optional[dict]:
+    """
+    doc_name(파일명)으로 catalog_documents에서 문서 메타데이터를 조회.
+
+    doc_agent의 Tier 2 온디맨드 파싱에서 source_file 경로를 얻기 위해 사용합니다.
+
+    Returns: 문서 메타데이터 딕셔너리 (source_file 포함), 없으면 None.
+    """
+    rows = execute_query(
+        "SELECT * FROM catalog_documents WHERE doc_name = %s LIMIT 1",
+        (doc_name,),
+    )
+    return rows[0] if rows else None
+
+
+def remove_document(source_file: str) -> Optional[dict]:
+    """
+    catalog_documents에서 source_file로 문서를 조회한 뒤 삭제.
+
+    삭제 전에 문서 정보를 조회하여 반환합니다 (로깅, ChromaDB 정리 등에 활용).
+
+    Returns: 삭제된 문서의 메타데이터 딕셔너리, 없으면 None.
+    """
+    rows = execute_query(
+        "SELECT * FROM catalog_documents WHERE source_file = %s",
+        (source_file,),
+    )
+    doc_info = rows[0] if rows else None
+
+    if doc_info:
+        with get_cursor() as cur:
+            cur.execute(
+                "DELETE FROM catalog_documents WHERE source_file = %s",
+                (source_file,),
+            )
+        logger.info(f"Document removed from catalog: {doc_info.get('doc_name', source_file)}")
+
+    return doc_info
+
+
+def get_tables_by_source(source_file: str) -> list[dict]:
+    """
+    source_file 경로로 catalog_tables에서 관련 테이블들을 조회.
+
+    하나의 Excel 파일이 여러 시트를 별도 테이블로 생성할 수 있으므로 리스트로 반환합니다.
+
+    Returns: 관련 테이블 메타데이터 딕셔너리 리스트.
+    """
+    return execute_query(
+        "SELECT * FROM catalog_tables WHERE source_file = %s",
+        (source_file,),
     )
 
 
