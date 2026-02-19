@@ -1,5 +1,9 @@
 """
-CSV/TSV 파일 → PostgreSQL 테이블 자동 적재.
+CSV/TSV 파일을 pandas로 읽어 PostgreSQL 테이블로 자동 적재하는 모듈.
+
+파일명에서 테이블명을 생성하고, 확장자에 따라 구분자(CSV→쉼표, TSV→탭)를
+자동 감지합니다. 인코딩은 UTF-8 → CP949 → EUC-KR → Latin-1 순서로 시도하여
+한글 파일도 처리 가능합니다. 기존 동명 테이블은 DROP 후 재생성됩니다.
 """
 
 import logging
@@ -22,8 +26,12 @@ logger = logging.getLogger(__name__)
 
 def load_csv(file_path: str) -> Optional[str]:
     """
-    CSV/TSV 파일을 읽어 PostgreSQL에 테이블로 적재.
-    Returns: 생성된 테이블 이름 또는 None.
+    CSV/TSV 파일을 pandas DataFrame으로 읽어 PostgreSQL 테이블로 적재.
+
+    처리 흐름: 구분자 감지 → 다중 인코딩 시도로 파일 읽기 → 컬럼명 SQL 안전 변환 →
+    테이블 DROP/CREATE → 데이터 INSERT → 카탈로그 등록 → 처리 이력 기록.
+    빈 파일이거나 예외 발생 시 실패 이력을 남기고 None을 반환합니다.
+    Returns: 생성된 테이블 이름 문자열 또는 실패 시 None.
     """
     path = Path(file_path)
     table_name = sanitize_table_name(path.stem)
@@ -71,7 +79,13 @@ def load_csv(file_path: str) -> Optional[str]:
 
 
 def _read_csv(file_path: str, sep: str) -> pd.DataFrame:
-    """UTF-8 → CP949 순서로 인코딩 시도."""
+    """
+    여러 인코딩(UTF-8, CP949, EUC-KR, Latin-1)을 순서대로 시도하여 CSV 파일을 읽음.
+
+    한글이 포함된 파일의 경우 UTF-8 실패 시 CP949, EUC-KR 순으로 시도하며,
+    모든 인코딩이 실패하면 ValueError를 발생시킵니다.
+    Returns: 파일 내용을 담은 pandas DataFrame.
+    """
     for encoding in ("utf-8", "cp949", "euc-kr", "latin-1"):
         try:
             return pd.read_csv(file_path, sep=sep, encoding=encoding)
@@ -81,7 +95,12 @@ def _read_csv(file_path: str, sep: str) -> pd.DataFrame:
 
 
 def _create_and_load(table_name: str, df: pd.DataFrame):
-    """테이블 생성(DROP IF EXISTS) 후 데이터 INSERT."""
+    """
+    기존 테이블을 DROP 후 DataFrame 스키마에 맞는 새 테이블을 CREATE하고 데이터를 INSERT.
+
+    df_to_pg_types()로 pandas dtype을 PostgreSQL 타입으로 매핑하여 DDL을 생성하고,
+    DataFrame의 각 행을 executemany()로 일괄 삽입합니다. NaN 값은 None으로 변환됩니다.
+    """
     col_defs = df_to_pg_types(df)
 
     create_sql = f"""

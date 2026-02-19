@@ -4,14 +4,6 @@
     <strong>AI를 사용한 가장 간단한 데이터 관리</strong>
   </p>
   <p align="center">
-    <a href="#why-adf">왜 ADF인가?</a> •
-    <a href="#quickstart">설치하기</a> •
-    <a href="#how-it-works">어떻게 동작하나요?</a> •
-    <a href="#usage">사용법</a> •
-    <a href="#configuration">설정</a> •
-    <a href="#roadmap">로드맵</a>
-  </p>
-  <p align="center">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License" />
     <img src="https://img.shields.io/badge/python-3.11+-green.svg" alt="Python" />
     <img src="https://img.shields.io/badge/version-0.1--alpha-orange.svg" alt="Version" />
@@ -32,6 +24,8 @@
 ✅ 전담 데이터 엔지니어가 없거나 1~2명이다
 ✅ 수천만 행 규모의 빅데이터는 아니지만, 관리가 점점 힘들어지고 있다
 ```
+- AI 의 발전이 늘어나면서 데이터 수집 및 관리의 필요성은 늘어났지만, 대부분의 서비스가 수천만 또는 억 단위의 빅데이터에 집중해 구현된 것이 아쉬웠습니다.  
+- 개인적인 경험으로, 빅데이터가 아니더라도 사람이 다루기는 어려운 데이터의 양을 AI를 사용하여 데이터를 수집하고 관리할 수 있으면 좋겠다는 생각으로 이 프로젝트를 진행하였습니다.
 
 ---
 
@@ -41,7 +35,7 @@
 "Open WebUI에서 파일 올리면 되지 않나요?"
 
 맞습니다. 빠르게 시작할 수 있는 좋은 도구들입니다.
-하지만 **회사 데이터를 다루는 환경**에서는 세 가지 문제가 생깁니다.
+하지만 밑과 같은 문제가 발생합니다.
 
 ### 🔒 보안: LLM이 파일시스템에 직접 접근합니다
 
@@ -156,7 +150,6 @@ MCP와 Open WebUI는 "질문하면 답해주는" 도구입니다.
 
 > 💡 FTP/SFTP 서버에 **업로드 완료 훅**을 설정하면, 파일이 올라오는 즉시 DataBridge가 처리합니다.
 > 주기적으로 폴더를 확인하는 방식이 아니라 **이벤트 기반**으로 동작합니다.
-> 설정 방법은 [FTP/SFTP 서버 훅 설정](#ftp-sftp-hook) 을 참고하세요.
 
 ### 2단계: AI 채팅으로 물어봅니다
 
@@ -285,9 +278,10 @@ MCP와 Open WebUI는 "질문하면 답해주는" 도구입니다.
 | **디스크** | 50 GB 이상 | 데이터 규모에 따라 |
 | **GPU** | 없어도 됩니다 | 있으면 응답이 빨라짐 |
 | **Docker** | Docker Compose v2.20+ | |
+| **Ollama** | v0.3 이상 | https://ollama.com/download |
 | **네트워크** | 사내망 접근 가능 | 인터넷 불필요 (설치 후) |
 
-### 설치 (5분)
+### 설치
 
 ```bash
 # 1. 다운로드
@@ -297,14 +291,28 @@ cd DataBridge_V0
 # 2. 설정 — 감시할 공유 폴더 경로를 지정합니다
 cp .env.example .env
 vi .env
-# WATCH_DIR=/mnt/shared/data   ← 공유 폴더 경로 지정
+# WATCH_DIR_HOST=/mnt/shared/data   ← 공유 폴더 경로 지정 (호스트 경로)
 
-# 3. 실행
+# 3. Ollama 설치 (서버에 설치, 최초 1회)
+#    https://ollama.com/download 에서 OS에 맞는 버전 설치
+
+# 4. Ollama 서비스 시작 및 모델 다운로드
+ollama serve &                      # 백그라운드 실행 (또는 systemd 서비스로 등록)
+ollama pull exaone3.5:7.8b          # 약 5GB, 최초 1회
+
+# 5. Docker 컨테이너 실행
 docker compose up -d
-
-# 4. AI 모델 다운로드 (최초 1회, 약 5GB)
-docker compose exec ollama ollama pull exaone3.5:7.8b
 ```
+
+> 💡 **Ollama 자동 시작 설정 (Linux)**
+> ```bash
+> # systemd 서비스 파일 복사 (scripts/ollama.service 참고)
+> sudo cp scripts/ollama.service /etc/systemd/system/
+> sudo systemctl enable ollama
+> sudo systemctl start ollama
+> ```
+>
+> **Windows의 경우**: 시작 프로그램에 `ollama serve` 등록 또는 작업 스케줄러 사용
 
 ### 접속
 
@@ -537,14 +545,49 @@ agentic-data-factory/
 
 ### 사용하는 기술
 
-서버 안에서 Docker 컨테이너 4개가 실행됩니다.
+서버 안에서 Docker 컨테이너 3개 + Ollama(시스템 서비스)가 실행됩니다.
 
-| 컨테이너 | 역할 | 비고 |
+```
+┌─ 서버 (Linux/Windows) ───────────────────────────────────────┐
+│                                                              │
+│  ┌─ Docker ────────────────────────────────────────────┐     │
+│  │                                                     │     │
+│  │  ┌─────────┐  ┌─────────────┐  ┌─────────────┐     │     │
+│  │  │   App   │  │ PostgreSQL  │  │  ChromaDB   │     │     │
+│  │  │ :8501   │  │   :5432     │  │   :8000     │     │     │
+│  │  └────┬────┘  └─────────────┘  └─────────────┘     │     │
+│  │       │                                            │     │
+│  └───────┼────────────────────────────────────────────┘     │
+│          │ host.docker.internal:11434                       │
+│          ▼                                                  │
+│  ┌─────────────┐                                            │
+│  │   Ollama    │  ◀── 시스템 서비스 (Docker 외부)            │
+│  │   :11434    │      GPU 직접 접근, 메모리 효율적 관리       │
+│  └─────────────┘                                            │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+         ▲
+    웹 브라우저 (http://서버IP:8501)
+         ▲
+┌─ 사용자 PC ─────┐
+│  설치 필요 없음  │
+└─────────────────┘
+```
+
+| 구성 요소 | 역할 | 실행 방식 |
 |---|---|---|
-| **App** | 파일 감시 + AI 에이전트 + 승인 + 채팅 UI | Python |
-| **PostgreSQL** | 정형 데이터 + 마트 + 감사 로그 | 경량 DB |
-| **ChromaDB** | 문서 검색용 저장소 | 경량 벡터 DB |
-| **Ollama** | AI 모델 실행 (사내망 안에서) | 로컬 LLM |
+| **App** | 파일 감시 + AI 에이전트 + 승인 + 채팅 UI | Docker 컨테이너 |
+| **PostgreSQL** | 정형 데이터 + 마트 + 감사 로그 | Docker 컨테이너 |
+| **ChromaDB** | 문서 검색용 저장소 | Docker 컨테이너 |
+| **Ollama** | AI 모델 실행 (사내망 안에서) | **시스템 서비스** |
+
+> ⚠️ **Ollama는 Docker 외부에서 시스템 서비스로 실행됩니다.**
+> - GPU 패스스루 설정 없이 GPU 직접 사용 가능
+> - 메모리 관리가 효율적 (Docker 메모리 제한에 영향받지 않음)
+> - 모델 로딩/언로딩이 빠름
+>
+> 사용자는 **서버에만** Ollama를 설치하면 됩니다. 개별 PC에 설치할 필요 없습니다.
+> 설치: https://ollama.com/download
 
 ---
 
@@ -561,7 +604,10 @@ POSTGRES_DB=adf
 POSTGRES_USER=adf
 POSTGRES_PASSWORD=changeme         # 반드시 변경하세요
 
-# === AI 모델 ===
+# === AI 모델 (서버에 Ollama 설치 필요) ===
+# Docker 컨테이너에서 호스트의 Ollama에 접근하는 주소
+# (docker-compose.yml에서 자동 설정됨, 변경 불필요)
+OLLAMA_HOST=http://localhost:11434
 LLM_MODEL=exaone3.5:7.8b          # 한국어 최적 모델
 # LLM_MODEL=qwen2.5:7b            # 대안
 
@@ -706,14 +752,6 @@ curl -X POST http://databridge:8501/api/webhook/file-uploaded \
 
 ## 보안
 
-### 기본 보안
-
-| 항목 | 설명 |
-|---|---|
-| **데이터 외부 전송 없음** | AI 모델도 사내 서버에서 실행. 인터넷 연결 불필요 (설치 후) |
-| **기존 DB 안전** | 외부 DB 연결 시 읽기 전용 계정만 사용 |
-| **사내망 전용** | 모든 서비스가 사내 네트워크 안에서만 접근 가능 |
-
 ### 쓰기 작업 안전장치
 
 | 항목 | 설명 |
@@ -740,14 +778,20 @@ curl -X POST http://databridge:8501/api/webhook/file-uploaded \
 
 ## FAQ
 
-**Q: Docker를 몰라도 되나요?**  
-설치할 때 명령어 3개만 입력하면 됩니다. Docker 자체를 다룰 필요는 없습니다.
+**Q: 사용자마다 Ollama를 설치해야 하나요?**
+아닙니다. Ollama는 **서버에만** 설치하면 됩니다. 사용자는 웹 브라우저로 서버에 접속하기만 하면 됩니다. 개별 PC에 AI 모델이나 특별한 프로그램을 설치할 필요가 없습니다.
+
+**Q: Ollama를 왜 Docker에 넣지 않나요?**
+GPU 사용과 메모리 관리 때문입니다. Docker 안에서 GPU를 쓰려면 복잡한 설정(NVIDIA Container Toolkit 등)이 필요하고, 컨테이너 메모리 제한에 걸리면 대용량 모델 로딩이 실패할 수 있습니다. 시스템 서비스로 실행하면 이런 문제 없이 GPU를 직접 사용하고, 메모리도 효율적으로 관리됩니다.
+
+**Q: Docker를 몰라도 되나요?**
+설치할 때 명령어 몇 개만 입력하면 됩니다. Docker 자체를 다룰 필요는 없습니다.
 
 **Q: 인터넷이 안 되는 환경에서도 쓸 수 있나요?**  
 최초 설치 시에만 인터넷이 필요합니다 (프로그램과 AI 모델 다운로드). 이후에는 인터넷 없이 동작합니다.
 
 **Q: 기존 공유 폴더 구조를 바꿔야 하나요?**  
-아닙니다. 기존 폴더 구조 그대로 사용하면 됩니다. ADF가 해당 폴더를 "감시"만 하므로 기존 파일이나 구조에 영향을 주지 않습니다.
+아닙니다. 기존 폴더 구조 그대로 사용하면 됩니다. 해당 폴더를 "감시"만 하므로 기존 파일이나 구조에 영향을 주지 않습니다.
 
 **Q: 엑셀 파일을 수정하면 DB도 업데이트되나요?**  
 파일이 변경되면 감지하여 DB를 갱신합니다. 기존 데이터를 덮어쓸지, 이력을 남길지는 설정에서 선택할 수 있습니다.
@@ -756,22 +800,29 @@ curl -X POST http://databridge:8501/api/webhook/file-uploaded \
 v0는 PostgreSQL만 지원합니다.
 
 **Q: 데이터가 많아지면 느려지나요?**  
-v0.1은 수만~수십만 행 규모에 최적화되어 있습니다. 수백만 행 이상이 되면 v1.x의 확장 아키텍처를 검토하세요.
+v0.1은 수만~수십만 행 규모를 고려하고 구현하였습니다.  
+그 이상의 데이터를 다뤄야 할 경우에는 다른 서비스를 고려해보시는 것을 추천드립니다.
 
 **Q: 여러 명이 동시에 쓸 수 있나요?**  
 채팅 UI에 여러 명이 동시 접속할 수 있습니다. 관리자는 사용자의 권한을 제어 가능합니다.
 
 **Q: 에이전트가 실수로 데이터를 날릴 수 있나요?**  
-없습니다. 에이전트는 `mart_` 접두사 테이블에만 쓸 수 있고, `DROP`/`DELETE` 등 파괴적 SQL은 원천 차단됩니다. 원본 테이블과 외부 DB에는 어떤 경우에도 쓸 수 없습니다. 그리고 쓰기 작업은 항상 사용자 승인이 필요합니다.
+없습니다. 에이전트는 `mart_` 접두사 테이블에만 쓸 수 있고, `DROP`/`DELETE` 등 파괴적 SQL은 원천 차단됩니다. 원본 테이블과 외부 DB에는 어떤 경우에도 쓸 수 없습니다. 그리고 쓰기 작업은 항상 사용자 승인이 필요합니다.  
+추후 영구삭제/복원/임시삭제 등의 작업도 지원을 고려하고 있습니다.
 
 **Q: 배치 작업이 실패하면 어떻게 되나요?**  
 실행 이력과 에러 로그가 저장되며, 채팅에서 `"배치 실행 이력 보여줘"`로 확인할 수 있습니다. 실패한 배치는 자동 재시도하지 않으며, 원인 확인 후 수동으로 재실행할 수 있습니다.
 
 **Q: FTP/SFTP로 데이터를 받고 있는데 연동할 수 있나요?**  
-예. FTP/SFTP 서버에 업로드 완료 훅을 설정하면, 파일이 올라오는 즉시 DataBridge가 자동으로 처리합니다. ProFTPD, vsftpd, OpenSSH SFTP 모두 지원합니다. 설정은 [FTP/SFTP 서버 훅 설정](#ftp-sftp-hook) 을 참고하세요.
+예. FTP/SFTP 서버에 업로드 완료 훅을 설정하면, 파일이 올라오는 즉시 DataBridge가 자동으로 처리합니다. ProFTPD, vsftpd, OpenSSH SFTP 모두 지원하는 것을 목표로 합니다.
 
 **Q: FTP 서버와 DataBridge가 같은 서버에 있어야 하나요?**  
 아닙니다. 같은 서버에 있으면 FTP 업로드 디렉토리를 직접 감시할 수 있어 가장 간단하지만 그렇지 않더라도 Webhook API를 통해 연동할 수 있습니다.
+
+**Q: 우리는 이걸 관리할 만한 개발자도 없는데, 관리 작업도 AI에게 넘길 수 있을까요?**  
+현재 시스템은 관리자가 SQL이나 인프라 구조를 어느 정도 이해한다는 전제하에 설계되었습니다. 하지만 정말 관리자를 두기 어려운 상황이라면, 상용모델을 활용하여 관리자 에이전트를 설계해 활용하는 것이 가능합니다.  
+관리자 에이전트 구현은 AdminAgent.md 를 참고하시길 바랍니다.
+하지만 개인적으로 AI에게 모든 관리 권한을 넘기는 것은 추천하지 않습니다.
 
 ---
 
@@ -788,7 +839,7 @@ v0.1은 수만~수십만 행 규모에 최적화되어 있습니다. 수백만 �
 - [ChromaDB](https://www.trychroma.com/) — 문서 검색 엔진
 - [LangGraph](https://github.com/langchain-ai/langgraph) — AI 에이전트 프레임워크
 - [Streamlit](https://streamlit.io/) — 채팅 UI
-- [watchdog](https://github.com/gorakhargosh/watchdog) — 파일 변경 감지
+- [watchdog](https://github.com/gorakhargosh/watchdog) — 파일 변경 감지할
 
 ---
 
