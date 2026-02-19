@@ -291,15 +291,28 @@ cd DataBridge_V0
 # 2. 설정 — 감시할 공유 폴더 경로를 지정합니다
 cp .env.example .env
 vi .env
-# WATCH_DIR=/mnt/shared/data   ← 공유 폴더 경로 지정
+# WATCH_DIR_HOST=/mnt/shared/data   ← 공유 폴더 경로 지정 (호스트 경로)
 
-# 3. Ollama 설치 및 모델 다운로드 (최초 1회)
-#    https://ollama.com/download 에서 OS에 맞는 버전 설치 후:
-ollama pull exaone3.5:7.8b          # 약 5GB
+# 3. Ollama 설치 (서버에 설치, 최초 1회)
+#    https://ollama.com/download 에서 OS에 맞는 버전 설치
 
-# 4. 실행
+# 4. Ollama 서비스 시작 및 모델 다운로드
+ollama serve &                      # 백그라운드 실행 (또는 systemd 서비스로 등록)
+ollama pull exaone3.5:7.8b          # 약 5GB, 최초 1회
+
+# 5. Docker 컨테이너 실행
 docker compose up -d
 ```
+
+> 💡 **Ollama 자동 시작 설정 (Linux)**
+> ```bash
+> # systemd 서비스 파일 복사 (scripts/ollama.service 참고)
+> sudo cp scripts/ollama.service /etc/systemd/system/
+> sudo systemctl enable ollama
+> sudo systemctl start ollama
+> ```
+>
+> **Windows의 경우**: 시작 프로그램에 `ollama serve` 등록 또는 작업 스케줄러 사용
 
 ### 접속
 
@@ -532,16 +545,48 @@ agentic-data-factory/
 
 ### 사용하는 기술
 
-서버 안에서 Docker 컨테이너 3개 + Ollama(로컬)가 실행됩니다.
+서버 안에서 Docker 컨테이너 3개 + Ollama(시스템 서비스)가 실행됩니다.
+
+```
+┌─ 서버 (Linux/Windows) ───────────────────────────────────────┐
+│                                                              │
+│  ┌─ Docker ────────────────────────────────────────────┐     │
+│  │                                                     │     │
+│  │  ┌─────────┐  ┌─────────────┐  ┌─────────────┐     │     │
+│  │  │   App   │  │ PostgreSQL  │  │  ChromaDB   │     │     │
+│  │  │ :8501   │  │   :5432     │  │   :8000     │     │     │
+│  │  └────┬────┘  └─────────────┘  └─────────────┘     │     │
+│  │       │                                            │     │
+│  └───────┼────────────────────────────────────────────┘     │
+│          │ host.docker.internal:11434                       │
+│          ▼                                                  │
+│  ┌─────────────┐                                            │
+│  │   Ollama    │  ◀── 시스템 서비스 (Docker 외부)            │
+│  │   :11434    │      GPU 직접 접근, 메모리 효율적 관리       │
+│  └─────────────┘                                            │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+         ▲
+    웹 브라우저 (http://서버IP:8501)
+         ▲
+┌─ 사용자 PC ─────┐
+│  설치 필요 없음  │
+└─────────────────┘
+```
 
 | 구성 요소 | 역할 | 실행 방식 |
 |---|---|---|
 | **App** | 파일 감시 + AI 에이전트 + 승인 + 채팅 UI | Docker 컨테이너 |
 | **PostgreSQL** | 정형 데이터 + 마트 + 감사 로그 | Docker 컨테이너 |
 | **ChromaDB** | 문서 검색용 저장소 | Docker 컨테이너 |
-| **Ollama** | AI 모델 실행 (사내망 안에서) | 로컬 설치 |
+| **Ollama** | AI 모델 실행 (사내망 안에서) | **시스템 서비스** |
 
-> 💡 Ollama는 메모리 절약을 위해 Docker 외부에서 로컬로 실행합니다.
+> ⚠️ **Ollama는 Docker 외부에서 시스템 서비스로 실행됩니다.**
+> - GPU 패스스루 설정 없이 GPU 직접 사용 가능
+> - 메모리 관리가 효율적 (Docker 메모리 제한에 영향받지 않음)
+> - 모델 로딩/언로딩이 빠름
+>
+> 사용자는 **서버에만** Ollama를 설치하면 됩니다. 개별 PC에 설치할 필요 없습니다.
 > 설치: https://ollama.com/download
 
 ---
@@ -559,8 +604,10 @@ POSTGRES_DB=adf
 POSTGRES_USER=adf
 POSTGRES_PASSWORD=changeme         # 반드시 변경하세요
 
-# === AI 모델 (Ollama 로컬 설치 필요) ===
-OLLAMA_HOST=http://localhost:11434 # Ollama 서버 주소
+# === AI 모델 (서버에 Ollama 설치 필요) ===
+# Docker 컨테이너에서 호스트의 Ollama에 접근하는 주소
+# (docker-compose.yml에서 자동 설정됨, 변경 불필요)
+OLLAMA_HOST=http://localhost:11434
 LLM_MODEL=exaone3.5:7.8b          # 한국어 최적 모델
 # LLM_MODEL=qwen2.5:7b            # 대안
 
@@ -731,8 +778,14 @@ curl -X POST http://databridge:8501/api/webhook/file-uploaded \
 
 ## FAQ
 
-**Q: Docker를 몰라도 되나요?**  
-설치할 때 명령어 3개만 입력하면 됩니다. Docker 자체를 다룰 필요는 없습니다.
+**Q: 사용자마다 Ollama를 설치해야 하나요?**
+아닙니다. Ollama는 **서버에만** 설치하면 됩니다. 사용자는 웹 브라우저로 서버에 접속하기만 하면 됩니다. 개별 PC에 AI 모델이나 특별한 프로그램을 설치할 필요가 없습니다.
+
+**Q: Ollama를 왜 Docker에 넣지 않나요?**
+GPU 사용과 메모리 관리 때문입니다. Docker 안에서 GPU를 쓰려면 복잡한 설정(NVIDIA Container Toolkit 등)이 필요하고, 컨테이너 메모리 제한에 걸리면 대용량 모델 로딩이 실패할 수 있습니다. 시스템 서비스로 실행하면 이런 문제 없이 GPU를 직접 사용하고, 메모리도 효율적으로 관리됩니다.
+
+**Q: Docker를 몰라도 되나요?**
+설치할 때 명령어 몇 개만 입력하면 됩니다. Docker 자체를 다룰 필요는 없습니다.
 
 **Q: 인터넷이 안 되는 환경에서도 쓸 수 있나요?**  
 최초 설치 시에만 인터넷이 필요합니다 (프로그램과 AI 모델 다운로드). 이후에는 인터넷 없이 동작합니다.

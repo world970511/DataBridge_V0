@@ -1,0 +1,35 @@
+[Unit]
+Description=Ollama LLM Server
+Documentation=https://ollama.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Ollama 실행
+ExecStart=/usr/local/bin/ollama serve
+
+# 환경 변수
+# 모든 인터페이스에서 접근 가능 (Docker 컨테이너 포함)
+Environment="OLLAMA_HOST=0.0.0.0"
+# GPU 메모리 사용량 제한 (선택)
+# Environment="OLLAMA_MAX_LOADED_MODELS=1"
+
+# 재시작 정책
+Restart=always
+RestartSec=3
+
+# 리소스 제한 (선택)
+# LimitNOFILE=65536
+# LimitNPROC=65536
+
+# 로깅
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ollama
+
+[Install]
+WantedBy=multi-user.target

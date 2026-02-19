@@ -26,6 +26,38 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# .env 파일에서 환경 변수 로드 (테스트 실행 전)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:
+    pass
+
+
+@pytest.fixture(scope="session", autouse=True)
+def reset_singletons():
+    """
+    테스트 세션 시작 시 싱글톤 초기화.
+
+    .env 파일 로드 후 settings 캐시와 DB 연결 풀을 초기화하여
+    새로운 설정값이 반영되도록 합니다.
+    """
+    # settings 싱글톤 초기화
+    try:
+        import config.settings as settings_module
+        settings_module._settings = None
+    except ImportError:
+        pass
+
+    # DB 연결 풀 초기화
+    try:
+        import db.connection as conn_module
+        conn_module._pool = None
+    except ImportError:
+        pass
+
+    yield
+
 
 # ============================================
 # 카탈로그 샘플 데이터

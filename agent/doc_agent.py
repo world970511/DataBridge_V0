@@ -9,6 +9,9 @@
 3. **RAG 응답 생성**: 전체 문서 텍스트와 질의를 LLM에 전달하여
    근거 기반의 자연어 답변을 생성합니다.
 
+**Lazy Loading**: 대용량 문서(MAX_EMBED_SIZE_MB 초과)는 업로드 시 임베딩을 생략하고
+최소 메타데이터만 저장합니다 (chunk_count=0). 질의 시 전체 텍스트를 온디맨드로 파싱합니다.
+
 파일이 디스크에서 삭제된 경우 요약 텍스트를 폴백으로 사용합니다.
 
 의존 모듈:
@@ -132,6 +135,7 @@ def process(question: str, n_results: int = 5) -> dict:
     answer = generate(
         prompt=rag_prompt,
         system=_RAG_SYSTEM_PROMPT,
+        purpose="agent",  # 에이전트용 모델 (문서 내용 포함)
         temperature=0.3,
     )
 
@@ -194,6 +198,9 @@ def _load_full_text(source_name: str) -> str:
     """
     문서 파일명으로 카탈로그에서 경로를 조회하고 전체 텍스트를 온디맨드 추출.
 
+    Lazy Loading된 문서(chunk_count=0)의 경우에도 동일하게 동작하며,
+    이 시점에 전체 텍스트가 처음으로 파싱됩니다.
+
     카탈로그에 문서가 없거나 파일이 디스크에 존재하지 않으면 빈 문자열을 반환합니다.
 
     Args:
@@ -212,10 +219,15 @@ def _load_full_text(source_name: str) -> str:
 
         file_path = doc_info.get("source_file", "")
         file_type = doc_info.get("file_type", "")
+        chunk_count = doc_info.get("chunk_count", 0)
 
         if not file_path or not Path(file_path).is_file():
             logger.warning(f"Source file missing from disk: {file_path}")
             return ""
+
+        # Lazy Loading 문서인 경우 로깅
+        if chunk_count == 0:
+            logger.info(f"Lazy-loaded document '{source_name}': starting on-demand parsing")
 
         text = extract_text(file_path, file_type)
         logger.debug(f"On-demand parsed '{source_name}': {len(text)} chars")

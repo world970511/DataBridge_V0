@@ -172,7 +172,7 @@ def main():
 
         if is_admin():
             menu_options.append("✅ 승인 관리")
-            menu_options.append("👥 사용자 관리")
+            menu_options.append("⚙️ 설정")
         else:
             menu_options.append("📋 내 요청 현황")
 
@@ -188,7 +188,7 @@ def main():
         render_chat_page()
     elif selected == "✅ 승인 관리":
         render_approval_page()
-    elif selected == "👥 사용자 관리":
+    elif selected == "⚙️ 설정":
         render_admin_page()
     elif selected == "📋 내 요청 현황":
         render_approval_page()

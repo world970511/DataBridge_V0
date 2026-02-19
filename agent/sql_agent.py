@@ -55,6 +55,7 @@ _SQL_SYSTEM_PROMPT = """당신은 PostgreSQL SQL 전문가입니다.
 - 사용자가 데이터 삭제/수정/생성을 요청하면 해당하는 SQL(DELETE, UPDATE, CREATE, INSERT 등)을 작성합니다
 - SQL은 반드시 ```sql 코드블록으로 감싸서 응답합니다
 - 테이블명과 컬럼명은 아래 스키마 정보를 정확히 참조합니다
+- 쿼리 문 작성 시 주석을 달지 않습니다.
 - 한국어 질문에 대해 한국어 별칭(alias)을 적절히 사용합니다
 - 집계 함수 사용 시 적절한 GROUP BY를 포함합니다
 - 결과가 너무 많을 수 있으면 LIMIT을 추가합니다
@@ -119,11 +120,12 @@ def process(question: str, user_id: str = "system") -> dict:
             user_id=user_id,
         )
 
-    # 3. LLM으로 SQL 생성
+    # 3. LLM으로 SQL 생성 (에이전트용 모델 사용 - 데이터 보안)
     system_prompt = _SQL_SYSTEM_PROMPT.format(schema=schema)
     llm_response = generate(
         prompt=f"다음 질문을 SQL로 변환해 주세요:\n\n{question}",
         system=system_prompt,
+        purpose="agent",  # 에이전트용 모델 (로컬 모델 권장 - 스키마 정보 보호)
         temperature=0.1,
     )
 
@@ -460,6 +462,7 @@ def _summarize_results(question: str, sql: str, exec_result: dict) -> str:
     summary = generate(
         prompt=summary_prompt,
         system=_SUMMARY_SYSTEM_PROMPT,
+        purpose="agent",  # 에이전트용 모델 (쿼리 결과 데이터 포함)
         temperature=0.3,
     )
 

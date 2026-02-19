@@ -7,13 +7,18 @@ ChromaDB의 'documents' 컬렉션에 임베딩합니다. 전체 텍스트는 임
 Tier 2 (질의 시): doc_agent가 extract_text()를 호출하여 원본 파일을 온디맨드로
 파싱하고, 전체 텍스트를 LLM에 직접 전달합니다.
 
+Lazy Loading: 파일 크기가 MAX_EMBED_SIZE_MB를 초과하면 임베딩을 건너뛰고
+카탈로그에만 등록합니다 (chunk_count=0). 질의 시 온디맨드로 파싱합니다.
+
 처리 결과는 카탈로그와 처리 이력 로그에 기록됩니다.
 """
 
 import logging
+import os
 from pathlib import Path
 
 from catalog.catalog import register_document
+from config.settings import get_settings
 from watcher.loader._utils import log_file_process
 
 logger = logging.getLogger(__name__)
@@ -21,11 +26,29 @@ logger = logging.getLogger(__name__)
 COLLECTION_NAME = "documents"
 
 
+def _get_file_size_mb(file_path: str) -> float:
+    """
+    파일 크기를 MB 단위로 반환.
+
+    Args:
+        file_path: 파일 절대 경로.
+
+    Returns: 파일 크기 (MB). 파일이 없으면 0.0.
+    """
+    try:
+        return os.path.getsize(file_path) / (1024 * 1024)
+    except OSError:
+        return 0.0
+
+
 def load_document(file_path: str, file_type: str):
     """
     문서 파일의 Tier 1 처리 파이프라인 (요약만 임베딩).
 
-    처리 흐름: 1) 파일 유형에 맞는 파서로 텍스트 추출 →
+    처리 흐름:
+    0) 파일 크기 확인 → MAX_EMBED_SIZE_MB 초과 시 Lazy Loading 모드로 전환
+       (카탈로그에만 등록, chunk_count=0, 임베딩 생략)
+    1) 파일 유형에 맞는 파서로 텍스트 추출 →
     2) generate_summary()로 경량 요약 생성 →
     3) chunk_text()로 요약 텍스트를 청크로 분할 →
     4) 기존 임베딩 삭제 후 요약 청크만 ChromaDB에 저장 →
@@ -33,8 +56,50 @@ def load_document(file_path: str, file_type: str):
     텍스트 추출 실패나 빈 청크 등 각 단계에서 실패 시 이력을 남기고 종료합니다.
     """
     path = Path(file_path)
+    settings = get_settings()
+    max_size_mb = settings.document.max_embed_size_mb
 
     try:
+        # 0. 파일 크기 확인 → Lazy Loading 여부 결정
+        file_size_mb = _get_file_size_mb(file_path)
+
+        if file_size_mb > max_size_mb:
+            # Lazy Loading: 최소 임베딩만 저장 (검색 가능하도록)
+            logger.info(
+                f"Lazy loading: {path.name} ({file_size_mb:.1f}MB > {max_size_mb}MB threshold)"
+            )
+
+            # 최소 메타데이터로 검색 가능하게 청크 1개 저장
+            lazy_summary = (
+                f"문서 파일: {path.name}\n"
+                f"파일 유형: {file_type}\n"
+                f"파일 크기: {file_size_mb:.1f}MB\n"
+                f"상태: 대용량 파일 - 질의 시 전체 내용 파싱"
+            )
+
+            from rag.chunker import chunk_text
+            from rag.embedder import delete_chunks, store_chunks
+
+            # 기존 임베딩 삭제 후 최소 청크 저장 (재업로드 대응)
+            delete_chunks(source=path.name, collection_name=COLLECTION_NAME)
+            lazy_chunks = chunk_text(lazy_summary, source=path.name)
+            store_chunks(lazy_chunks, collection_name=COLLECTION_NAME)
+
+            # 카탈로그 등록 (chunk_count=0으로 Lazy Loading 표시)
+            register_document(
+                doc_name=path.name,
+                source_file=str(file_path),
+                file_type=file_type,
+                chunk_count=0,  # Lazy Loading 표시 (실제 청크는 1개 있음)
+                collection_name=COLLECTION_NAME,
+                summary_text=lazy_summary,
+            )
+            log_file_process(
+                file_path, file_type, "register_for_search", None, "success",
+                f"Lazy loaded ({file_size_mb:.1f}MB)"
+            )
+            return
+
         # 1. 텍스트 추출
         text = _extract_text(file_path, file_type)
         if not text or not text.strip():

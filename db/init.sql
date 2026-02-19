@@ -150,3 +150,35 @@ CREATE TABLE IF NOT EXISTS file_process_log (
 
 CREATE INDEX IF NOT EXISTS idx_file_log_path ON file_process_log(file_path);
 CREATE INDEX IF NOT EXISTS idx_file_log_processed ON file_process_log(processed_at);
+
+-- ============================================
+-- 6. LLM 설정 (런타임 모델 설정)
+-- ============================================
+-- 관리자가 UI에서 설정한 LLM 프로바이더/모델 정보를 저장합니다.
+-- 환경 변수보다 우선 적용되어 재시작 없이 모델 변경이 가능합니다.
+CREATE TABLE IF NOT EXISTS llm_settings (
+    id              SERIAL PRIMARY KEY,
+    setting_key     VARCHAR(100) NOT NULL UNIQUE,
+    -- orchestrator_provider, orchestrator_model, orchestrator_api_key, orchestrator_base_url
+    -- agent_provider, agent_model, agent_api_key, agent_base_url
+    -- airgapped_mode
+    setting_value   TEXT,
+    is_encrypted    BOOLEAN DEFAULT FALSE,
+    -- API 키 등 민감 정보는 암호화 표시
+    description     VARCHAR(500),
+    updated_by      VARCHAR(100) DEFAULT 'system',
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 초기 설정값 삽입 (ON CONFLICT로 중복 방지)
+INSERT INTO llm_settings (setting_key, setting_value, description) VALUES
+    ('orchestrator_provider', 'ollama', '오케스트레이터 LLM 프로바이더 (ollama/openai/anthropic)'),
+    ('orchestrator_model', 'exaone3.5:7.8b', '오케스트레이터 LLM 모델명'),
+    ('orchestrator_api_key', '', '오케스트레이터 API 키 (상용 모델용)'),
+    ('orchestrator_base_url', 'http://localhost:11434', '오케스트레이터 API URL'),
+    ('agent_provider', 'ollama', '에이전트 LLM 프로바이더 (ollama/openai/anthropic)'),
+    ('agent_model', 'exaone3.5:7.8b', '에이전트 LLM 모델명'),
+    ('agent_api_key', '', '에이전트 API 키 (상용 모델용)'),
+    ('agent_base_url', 'http://localhost:11434', '에이전트 API URL'),
+    ('airgapped_mode', 'false', '폐쇄망 모드 (true면 상용 API 비활성화)')
+ON CONFLICT (setting_key) DO NOTHING;

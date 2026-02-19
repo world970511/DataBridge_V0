@@ -42,6 +42,50 @@ class ChromaConfig:
 class OllamaConfig:
     host: str = "http://localhost:11434"
     model: str = "exaone3.5:7.8b"
+    timeout: int = 120  # LLM 응답 타임아웃 (초). CPU 환경에서는 60초 이상 걸릴 수 있음
+
+
+@dataclass
+class LLMProviderConfig:
+    """
+    개별 LLM 프로바이더 설정.
+
+    provider: 프로바이더 유형 ("ollama", "openai", "anthropic")
+    model: 사용할 모델명
+    api_key: API 키 (상용 모델용, Ollama는 불필요)
+    base_url: API 엔드포인트 URL (Ollama용 또는 커스텀 엔드포인트)
+    """
+    provider: str = "ollama"
+    model: str = "exaone3.5:7.8b"
+    api_key: str = ""
+    base_url: str = "http://localhost:11434"
+
+
+@dataclass
+class LLMConfig:
+    """
+    다중 모델 LLM 설정.
+
+    orchestrator: 오케스트레이터용 모델 (의도 분류 등 간단한 작업)
+                  - 상용 모델 사용 시 빠르고 정확한 라우팅 가능
+                  - 민감 데이터 노출 위험 낮음 (질의 텍스트만 전송)
+
+    agent: 에이전트용 모델 (SQL 생성, RAG 응답 등 데이터 처리)
+           - 로컬 모델 권장 (민감 데이터 보호)
+           - 스키마 정보, 쿼리 결과 등이 LLM에 전달됨
+
+    폐쇄망 환경:
+        - orchestrator와 agent 모두 ollama 사용 필수
+        - 상용 API는 인터넷 연결 필요
+
+    하이브리드 환경 (제한적 인터넷):
+        - orchestrator: 상용 모델 가능 (빠른 응답, 높은 정확도)
+        - agent: ollama 권장 (데이터 보안)
+    """
+    orchestrator: LLMProviderConfig = field(default_factory=LLMProviderConfig)
+    agent: LLMProviderConfig = field(default_factory=LLMProviderConfig)
+    # 폐쇄망 모드 여부 (True면 상용 API 비활성화)
+    airgapped_mode: bool = False
 
 
 @dataclass
@@ -56,6 +100,18 @@ class WatcherConfig:
     watch_dir: str = "/data"
     webhook_enabled: bool = True
     webhook_secret: str = "changeme"
+
+
+@dataclass
+class DocumentConfig:
+    """
+    문서 처리 관련 설정.
+
+    max_embed_size_mb: 임베딩을 수행할 최대 파일 크기(MB). 이 크기를 초과하는
+                       문서는 Lazy Loading 모드로 처리되어 카탈로그에만 등록되고,
+                       ChromaDB 임베딩은 건너뜁니다. 질의 시 온디맨드로 파싱합니다.
+    """
+    max_embed_size_mb: float = 10.0
 
 
 @dataclass
@@ -77,8 +133,10 @@ class Settings:
     db: DatabaseConfig = field(default_factory=DatabaseConfig)
     chroma: ChromaConfig = field(default_factory=ChromaConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     watcher: WatcherConfig = field(default_factory=WatcherConfig)
+    document: DocumentConfig = field(default_factory=DocumentConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
     app_port: int = 8501
     job_log_dir: str = "./logs/jobs"
@@ -109,6 +167,7 @@ def load_settings() -> Settings:
     ollama = OllamaConfig(
         host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         model=os.getenv("LLM_MODEL", "exaone3.5:7.8b"),
+        timeout=int(os.getenv("LLM_TIMEOUT", "120")),
     )
 
     agent = AgentConfig(
@@ -128,12 +187,41 @@ def load_settings() -> Settings:
         secret_key=os.getenv("SECRET_KEY", "databridge-secret-key-change-me"),
     )
 
+    document = DocumentConfig(
+        max_embed_size_mb=float(os.getenv("MAX_EMBED_SIZE_MB", "10.0")),
+    )
+
+    # LLM 다중 모델 설정
+    # 오케스트레이터: 의도 분류 등 간단한 작업 (상용 모델 가능)
+    orchestrator_llm = LLMProviderConfig(
+        provider=os.getenv("ORCHESTRATOR_LLM_PROVIDER", "ollama"),
+        model=os.getenv("ORCHESTRATOR_LLM_MODEL", ollama.model),
+        api_key=os.getenv("ORCHESTRATOR_LLM_API_KEY", ""),
+        base_url=os.getenv("ORCHESTRATOR_LLM_BASE_URL", ollama.host),
+    )
+
+    # 에이전트: SQL 생성, RAG 등 데이터 처리 (로컬 모델 권장)
+    agent_llm = LLMProviderConfig(
+        provider=os.getenv("AGENT_LLM_PROVIDER", "ollama"),
+        model=os.getenv("AGENT_LLM_MODEL", ollama.model),
+        api_key=os.getenv("AGENT_LLM_API_KEY", ""),
+        base_url=os.getenv("AGENT_LLM_BASE_URL", ollama.host),
+    )
+
+    llm = LLMConfig(
+        orchestrator=orchestrator_llm,
+        agent=agent_llm,
+        airgapped_mode=os.getenv("AIRGAPPED_MODE", "false").lower() == "true",
+    )
+
     return Settings(
         db=db,
         chroma=chroma,
         ollama=ollama,
+        llm=llm,
         agent=agent,
         watcher=watcher,
+        document=document,
         auth=auth,
         app_port=int(os.getenv("APP_PORT", "8501")),
         job_log_dir=os.getenv("JOB_LOG_DIR", "./logs/jobs"),
