@@ -13,7 +13,10 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from agent.tools.query_db import validate_sql
-from agent.tools.list_tables import get_all_tables_summary, get_table_names, _format_columns
+from agent.tools.list_tables import (
+    get_all_tables_summary, get_table_names, get_table_tags,
+    _format_columns, _format_columns_rich,
+)
 from agent.tools.search_docs import format_search_results
 
 
@@ -147,12 +150,58 @@ class TestFormatColumns:
     def test_none_input(self):
         """None 입력 시 안내 메시지를 반환합니다."""
         result = _format_columns(None)
-        assert "컬럼 정보 없음" in result
+        assert "No column info" in result
 
     def test_empty_list(self):
         """빈 리스트 입력 시 안내 메시지를 반환합니다."""
         result = _format_columns([])
-        assert "컬럼 정보 없음" in result
+        assert "No column info" in result
+
+
+@pytest.mark.unit
+class TestFormatColumnsRich:
+    """_format_columns_rich() — Rich Catalog 컬럼 포맷팅 테스트."""
+
+    def test_with_descriptions(self):
+        """column_descriptions가 있으면 '컬럼명(타입) - 설명' 형식입니다."""
+        columns = [
+            {"name": "id", "type": "BIGINT"},
+            {"name": "name", "type": "TEXT"},
+        ]
+        descs = {"id": "고유 식별자", "name": "제품명"}
+        result = _format_columns_rich(columns, descs)
+        assert "id(BIGINT) - 고유 식별자" in result
+        assert "name(TEXT) - 제품명" in result
+
+    def test_partial_descriptions(self):
+        """일부 컬럼만 설명이 있으면 해당 컬럼만 설명이 붙습니다."""
+        columns = [
+            {"name": "id", "type": "BIGINT"},
+            {"name": "name", "type": "TEXT"},
+        ]
+        descs = {"name": "제품명"}  # id는 설명 없음
+        result = _format_columns_rich(columns, descs)
+        assert "id(BIGINT)" in result
+        assert "- 고유 식별자" not in result  # id에는 설명 없음
+        assert "name(TEXT) - 제품명" in result
+
+    def test_json_string_descriptions(self):
+        """JSON 문자열 형태의 column_descriptions도 처리합니다."""
+        import json
+        columns = [{"name": "amount", "type": "DOUBLE PRECISION"}]
+        descs = json.dumps({"amount": "매출액(원)"})
+        result = _format_columns_rich(columns, descs)
+        assert "amount(DOUBLE PRECISION) - 매출액(원)" in result
+
+    def test_no_descriptions(self):
+        """column_descriptions가 None이면 기존 형식으로 폴백합니다."""
+        columns = [{"name": "id", "type": "BIGINT"}]
+        result = _format_columns_rich(columns, None)
+        assert "id(BIGINT)" in result
+
+    def test_backward_compatible_alias(self):
+        """_format_columns는 _format_columns_rich의 별칭입니다."""
+        assert _format_columns is _format_columns_rich
 
 
 @pytest.mark.unit
@@ -164,7 +213,7 @@ class TestGetAllTablesSummary:
         """카탈로그 데이터가 있으면 마크다운 형식의 요약을 반환합니다."""
         mock_list.return_value = sample_catalog_tables
         result = get_all_tables_summary()
-        assert "사용 가능한 테이블" in result
+        assert "Available Tables" in result
         assert "sales" in result
         assert "products" in result
 
@@ -173,7 +222,7 @@ class TestGetAllTablesSummary:
         """카탈로그가 비어있으면 안내 메시지를 반환합니다."""
         mock_list.return_value = []
         result = get_all_tables_summary()
-        assert "등록된 테이블이 없습니다" in result
+        assert "No tables registered" in result
 
     @patch("agent.tools.list_tables.list_tables")
     def test_includes_row_count(self, mock_list, sample_catalog_tables):
@@ -181,6 +230,30 @@ class TestGetAllTablesSummary:
         mock_list.return_value = sample_catalog_tables
         result = get_all_tables_summary()
         assert "15,230" in result
+
+    @patch("agent.tools.list_tables.list_tables")
+    def test_rich_catalog_includes_description(self, mock_list, sample_rich_catalog_tables):
+        """Rich Catalog 데이터가 있으면 설명이 포함됩니다."""
+        mock_list.return_value = sample_rich_catalog_tables
+        result = get_all_tables_summary()
+        assert "Description:" in result
+        assert "2024년 2월" in result
+
+    @patch("agent.tools.list_tables.list_tables")
+    def test_rich_catalog_includes_tags(self, mock_list, sample_rich_catalog_tables):
+        """Rich Catalog 데이터가 있으면 태그가 포함됩니다."""
+        mock_list.return_value = sample_rich_catalog_tables
+        result = get_all_tables_summary()
+        assert "Tags:" in result
+        assert "매출" in result
+
+    @patch("agent.tools.list_tables.list_tables")
+    def test_rich_catalog_includes_column_descriptions(self, mock_list, sample_rich_catalog_tables):
+        """Rich Catalog 데이터가 있으면 컬럼 설명이 포함됩니다."""
+        mock_list.return_value = sample_rich_catalog_tables
+        result = get_all_tables_summary()
+        assert "매출액(원)" in result
+        assert "제품명" in result
 
 
 @pytest.mark.unit
@@ -200,6 +273,29 @@ class TestGetTableNames:
         mock_list.return_value = []
         names = get_table_names()
         assert names == []
+
+
+@pytest.mark.unit
+class TestGetTableTags:
+    """get_table_tags() — 태그 매핑 조회 테스트."""
+
+    @patch("catalog.catalog.get_table_tags")
+    def test_returns_tag_mapping(self, mock_tags):
+        """태그 매핑 딕셔너리를 반환합니다."""
+        mock_tags.return_value = {
+            "sales": ["매출", "제품"],
+            "products": ["제품", "마스터"],
+        }
+        tags = get_table_tags()
+        assert "sales" in tags
+        assert "매출" in tags["sales"]
+
+    @patch("catalog.catalog.get_table_tags")
+    def test_empty_tags(self, mock_tags):
+        """태그가 없으면 빈 딕셔너리를 반환합니다."""
+        mock_tags.return_value = {}
+        tags = get_table_tags()
+        assert tags == {}
 
 
 # ============================================

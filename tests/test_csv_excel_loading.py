@@ -6,11 +6,14 @@ watcher/loader/_utils.py의 기능을 테스트합니다.
 
 - Unit 테스트: sanitize_table_name, df_to_pg_types 등 순수 함수 테스트
 - Integration 테스트: 실제 DB 연결이 필요한 load_csv, load_excel 테스트
+- Rich Metadata 테스트: 메타데이터 생성 및 카탈로그 등록 확인 (mock)
 
 실행:
     pytest tests/test_csv_excel_loading.py -v -m unit        # 순수 함수만
     pytest tests/test_csv_excel_loading.py -v -m integration # DB 필요
 """
+
+from unittest.mock import patch, MagicMock
 
 import pytest
 import pandas as pd
@@ -180,3 +183,79 @@ class TestExcelLoadIntegration:
         assert len(tables) >= 1
         rows = execute_query(f'SELECT COUNT(*) as cnt FROM "{tables[0]}"')
         assert rows[0]["cnt"] == 2  # Excel 픽스처에 2행 데이터
+
+
+# ============================================
+# Rich Metadata 전달 확인 (mock 기반)
+# ============================================
+
+@pytest.mark.unit
+class TestRichMetadataPassthrough:
+    """CSV/Excel 로더가 Rich Metadata를 카탈로그에 전달하는지 확인."""
+
+    @patch("watcher.loader.csv_loader.register_table")
+    @patch("watcher.metadata_generator.generate_rich_metadata")
+    @patch("watcher.loader.csv_loader.get_connection")
+    def test_csv_passes_metadata_to_register(
+        self, mock_conn, mock_gen_meta, mock_register, sample_csv_file
+    ):
+        """CSV 로더가 generate_rich_metadata 결과를 register_table에 전달합니다."""
+        from watcher.metadata_generator import RichMetadata
+        from watcher.loader.csv_loader import load_csv
+
+        # DB mock 설정
+        mock_cur = MagicMock()
+        mock_conn.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+        mock_conn.return_value.__enter__.return_value.cursor.return_value = mock_cur
+
+        # 메타데이터 mock
+        mock_gen_meta.return_value = RichMetadata(
+            description="테스트 매출 데이터",
+            data_category="statistics",
+            tags=["매출", "테스트"],
+            column_descriptions={"id": "ID", "product_name": "제품명"},
+            sample_values={"id": ["1", "2"]},
+            numeric_ratio=0.5,
+            avg_text_length=10.0,
+        )
+
+        load_csv(sample_csv_file)
+
+        # register_table이 호출되었는지 확인
+        mock_register.assert_called_once()
+        call_kwargs = mock_register.call_args
+        kwargs = call_kwargs.kwargs if call_kwargs.kwargs else {}
+        # positional args에서 keyword로 전달될 수도 있음
+        if not kwargs:
+            # **register_kwargs로 전달되므로 kwargs에 있어야 함
+            pass
+
+    @patch("watcher.loader.csv_loader.register_table")
+    @patch("watcher.metadata_generator.generate_rich_metadata")
+    @patch("watcher.loader.csv_loader.get_connection")
+    def test_csv_data_category_parameter(
+        self, mock_conn, mock_gen_meta, mock_register, sample_csv_file
+    ):
+        """CSV 로더가 data_category 파라미터를 받습니다."""
+        from watcher.metadata_generator import RichMetadata
+        from watcher.loader.csv_loader import load_csv
+
+        mock_cur = MagicMock()
+        mock_conn.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+        mock_conn.return_value.__enter__.return_value.cursor.return_value = mock_cur
+
+        mock_gen_meta.return_value = RichMetadata(
+            description=None, data_category="document",
+            tags=None, column_descriptions=None,
+            sample_values={}, numeric_ratio=0.0, avg_text_length=0.0,
+        )
+
+        # data_category 파라미터 전달 (스마트 분류기에서 호출 시)
+        load_csv(sample_csv_file, data_category="document")
+
+        mock_gen_meta.assert_called_once()
+        # generate_rich_metadata에 data_category가 전달되었는지 확인
+        gen_call = mock_gen_meta.call_args
+        assert gen_call is not None

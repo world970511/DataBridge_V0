@@ -13,6 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+
+# 프로젝트 루트의 .env 파일 로드 (로컬 실행 시 필수, Docker에서는 무해)
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(_env_path, override=False)  # 기존 환경변수가 있으면 유지
+
 
 @dataclass
 class DatabaseConfig:
@@ -41,7 +47,7 @@ class ChromaConfig:
 @dataclass
 class OllamaConfig:
     host: str = "http://localhost:11434"
-    model: str = "exaone3.5:7.8b"
+    model: str = "gemma2:2b"
     timeout: int = 120  # LLM 응답 타임아웃 (초). CPU 환경에서는 60초 이상 걸릴 수 있음
 
 
@@ -50,13 +56,13 @@ class LLMProviderConfig:
     """
     개별 LLM 프로바이더 설정.
 
-    provider: 프로바이더 유형 ("ollama", "openai", "anthropic")
+    provider: 프로바이더 유형 ("ollama", "openai", "anthropic", "huggingface")
     model: 사용할 모델명
-    api_key: API 키 (상용 모델용, Ollama는 불필요)
-    base_url: API 엔드포인트 URL (Ollama용 또는 커스텀 엔드포인트)
+    api_key: API 키 (상용 모델용, Ollama는 불필요. HF: hf_xxx 형식)
+    base_url: API 엔드포인트 URL (Ollama용 또는 커스텀 엔드포인트, HF는 미사용)
     """
     provider: str = "ollama"
-    model: str = "exaone3.5:7.8b"
+    model: str = "gemma2:2b"
     api_key: str = ""
     base_url: str = "http://localhost:11434"
 
@@ -166,7 +172,7 @@ def load_settings() -> Settings:
 
     ollama = OllamaConfig(
         host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-        model=os.getenv("LLM_MODEL", "exaone3.5:7.8b"),
+        model=os.getenv("LLM_MODEL", "gemma2:2b"),
         timeout=int(os.getenv("LLM_TIMEOUT", "120")),
     )
 

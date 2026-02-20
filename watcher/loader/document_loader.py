@@ -169,8 +169,10 @@ def _extract_text(file_path: str, file_type: str) -> str:
     파일 유형에 따라 적절한 파서를 선택하여 텍스트를 추출.
 
     pdf → pdf_parser.parse_pdf(), docx → python-docx 기반 추출,
-    text → UTF-8로 직접 읽기. 지원하지 않는 유형은 빈 문자열을 반환합니다.
+    text → UTF-8로 직접 읽기 (단, CSV 구조 감지 시 CSV 로더로 라우팅).
+    지원하지 않는 유형은 빈 문자열을 반환합니다.
     Returns: 추출된 텍스트 문자열 (실패 또는 미지원 유형은 빈 문자열).
+             CSV 구조 감지 시 CSV 로더로 라우팅하고 빈 문자열을 반환.
     """
     if file_type == "pdf":
         from rag.parser.pdf_parser import parse_pdf
@@ -178,10 +180,95 @@ def _extract_text(file_path: str, file_type: str) -> str:
     elif file_type == "docx":
         return _extract_docx(file_path)
     elif file_type == "text":
+        # CSV 구조 감지: 텍스트 파일이 실제로는 CSV 데이터일 수 있음
+        if _looks_like_csv(file_path):
+            logger.info(
+                f"Text file detected as CSV structure, routing to CSV loader: {file_path}"
+            )
+            _redirect_to_csv_loader(file_path)
+            return ""  # 문서 파이프라인 중단 (CSV 로더가 처리)
         return Path(file_path).read_text(encoding="utf-8", errors="replace")
     else:
         logger.warning(f"Unsupported document type for extraction: {file_type}")
         return ""
+
+
+def _looks_like_csv(file_path: str, sample_lines: int = 10) -> bool:
+    """
+    텍스트 파일 앞부분을 읽어 CSV/TSV 구조인지 휴리스틱 판별.
+
+    판별 기준:
+    1) 비어 있지 않은 줄이 최소 2줄 이상 (헤더 + 데이터 1행)
+    2) 일관된 구분자(쉼표 또는 탭)가 존재
+    3) 헤더를 포함한 과반수 줄의 필드 개수가 동일 (최소 2컬럼)
+
+    Args:
+        file_path: 텍스트 파일 절대 경로.
+        sample_lines: 판별에 사용할 최대 줄 수 (기본 10).
+
+    Returns:
+        True이면 CSV/TSV 구조로 간주.
+    """
+    import csv
+    import io
+
+    try:
+        raw = Path(file_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return False
+
+    sample = lines[:sample_lines]
+
+    # csv.Sniffer로 구분자 감지 시도
+    try:
+        dialect = csv.Sniffer().sniff("\n".join(sample), delimiters=",\t;|")
+        delimiter = dialect.delimiter
+    except csv.Error:
+        # Sniffer 실패 시 쉼표/탭 빈도로 판단
+        comma_count = sum(ln.count(",") for ln in sample)
+        tab_count = sum(ln.count("\t") for ln in sample)
+        if comma_count == 0 and tab_count == 0:
+            return False
+        delimiter = "\t" if tab_count > comma_count else ","
+
+    # 각 줄의 필드 개수 계산
+    field_counts = []
+    for ln in sample:
+        reader = csv.reader(io.StringIO(ln), delimiter=delimiter)
+        fields = next(reader, [])
+        field_counts.append(len(fields))
+
+    if not field_counts:
+        return False
+
+    # 최소 2컬럼 이상이어야 CSV로 간주
+    header_fields = field_counts[0]
+    if header_fields < 2:
+        return False
+
+    # 과반수 줄이 헤더와 동일한 필드 수를 가져야 함
+    matching = sum(1 for c in field_counts if c == header_fields)
+    return matching / len(field_counts) >= 0.5
+
+
+def _redirect_to_csv_loader(file_path: str):
+    """
+    CSV 구조로 감지된 텍스트 파일을 스마트 분류 파이프라인으로 라우팅.
+
+    classifier._route_to_db_loader()를 호출하여 내용 분석 기반의
+    스마트 라우팅(DB or ChromaDB)을 수행합니다.
+
+    Args:
+        file_path: 원본 텍스트 파일 경로.
+    """
+    from watcher.classifier import _route_to_db_loader
+
+    logger.info(f"Redirecting text file to CSV pipeline: {file_path}")
+    _route_to_db_loader(file_path, file_type="csv")
 
 
 def _extract_docx(file_path: str) -> str:
@@ -199,3 +286,134 @@ def _extract_docx(file_path: str) -> str:
     except ImportError:
         logger.error("python-docx not installed. Cannot parse DOCX files.")
         return ""
+
+
+# ============================================
+# 스마트 분류기: DataFrame → 문서 변환
+# ============================================
+
+def load_document_from_dataframe(
+    file_path: str,
+    file_type: str,
+    df,  # pd.DataFrame — 지연 임포트 대신 타입 생략
+    data_category: str = "document",
+):
+    """
+    문서형으로 판별된 CSV/Excel DataFrame을 ChromaDB에 저장.
+
+    스마트 분류기(classifier.py)가 내용 분석 후 문서형으로 판별한
+    CSV/Excel 파일을 기존 문서 파이프라인(요약→청킹→임베딩→카탈로그)으로 처리합니다.
+    DataFrame의 각 행을 "컬럼명: 값" 형식의 텍스트 문단으로 변환합니다.
+
+    Args:
+        file_path: 원본 파일 경로 (카탈로그 등록용).
+        file_type: 파일 유형 ('csv' 또는 'excel').
+        df: 변환 대상 DataFrame.
+        data_category: 데이터 카테고리 ('document' 또는 'reference').
+    """
+    import pandas as pd
+
+    path = Path(file_path)
+
+    try:
+        # DataFrame → 텍스트 변환
+        text = _dataframe_to_text(df, path.name)
+
+        if not text or not text.strip():
+            logger.warning(f"No text converted from DataFrame: {file_path}")
+            log_file_process(
+                file_path, file_type, "register_for_search", None, "failed",
+                "Empty text from DataFrame"
+            )
+            return
+
+        # 요약 생성
+        from rag.summarizer import generate_summary
+        summary = generate_summary(text, source=path.name)
+
+        if not summary:
+            # 폴백: 원본 텍스트 앞부분 사용
+            summary = text[:1500]
+
+        # 청킹 및 임베딩
+        from rag.chunker import chunk_text
+        from rag.embedder import delete_chunks, store_chunks
+
+        chunks = chunk_text(summary, source=path.name)
+
+        # 기존 임베딩 삭제 후 새 청크 저장 (재업로드 대응)
+        delete_chunks(source=path.name, collection_name=COLLECTION_NAME)
+        if chunks:
+            store_chunks(chunks, collection_name=COLLECTION_NAME)
+
+        # 카탈로그에 문서로 등록
+        register_document(
+            doc_name=path.name,
+            source_file=str(file_path),
+            file_type=file_type,
+            chunk_count=len(chunks),
+            collection_name=COLLECTION_NAME,
+            summary_text=summary,
+        )
+
+        log_file_process(
+            file_path, file_type, "register_for_search", None, "success",
+            f"Smart classified as {data_category}"
+        )
+        logger.info(
+            f"Spreadsheet loaded as document: {path.name} "
+            f"({len(chunks)} summary chunks, category={data_category})"
+        )
+
+    except Exception as e:
+        logger.exception(f"Failed to load spreadsheet as document: {file_path}")
+        log_file_process(
+            file_path, file_type, "register_for_search", None, "failed", str(e)
+        )
+
+
+def _dataframe_to_text(df, source_name: str) -> str:
+    """
+    DataFrame의 각 행을 "컬럼명: 값" 형식의 텍스트 문단으로 변환.
+
+    문서형 스프레드시트(테스트 케이스, 체크리스트, 회의록 등)를
+    시맨틱 검색에 적합한 자연어 텍스트로 변환합니다.
+
+    Args:
+        df: 변환 대상 DataFrame.
+        source_name: 문서 출처 파일명.
+
+    Returns:
+        변환된 전체 텍스트 문자열.
+
+    변환 형식 예시::
+
+        문서 출처: 테스트케이스_v3.xlsx
+
+        [항목 1]
+        테스트명: 로그인 테스트
+        설명: 사용자가 올바른 비밀번호로 로그인할 수 있는지 확인
+        예상결과: 로그인 성공
+
+        [항목 2]
+        ...
+    """
+    import pandas as pd
+
+    lines = [f"문서 출처: {source_name}\n"]
+
+    for idx, row in df.iterrows():
+        # 행 번호는 1부터 시작 (사용자 친화적)
+        display_idx = idx + 1 if isinstance(idx, int) else idx
+        lines.append(f"[항목 {display_idx}]")
+        for col in df.columns:
+            val = row[col]
+            if pd.notna(val):
+                val_str = str(val)
+                # 너무 긴 값은 잘라냄 (임베딩 효율)
+                if len(val_str) > 500:
+                    val_str = val_str[:497] + "..."
+                lines.append(f"{col}: {val_str}")
+        lines.append("")  # 빈 줄로 항목 구분
+
+    return "\n".join(lines)

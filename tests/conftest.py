@@ -6,12 +6,16 @@ pytest 공통 픽스처 모듈.
 
 픽스처 목록:
     - sample_catalog_tables: 카탈로그 테이블 메타데이터 샘플
+    - sample_rich_catalog_tables: Rich Catalog 적용된 메타데이터 샘플
     - sample_catalog_documents: 카탈로그 문서 메타데이터 샘플
     - sample_search_results: ChromaDB 검색 결과 샘플
     - sample_csv_file: 임시 CSV 파일 경로
     - sample_excel_file: 임시 Excel 파일 경로
     - sample_pdf_file: 임시 PDF 파일 경로
     - tmp_watch_dir: 임시 감시 디렉토리
+    - sample_statistics_df: 숫자 비율 높은 통계형 DataFrame
+    - sample_document_df: 긴 텍스트 포함 문서형 DataFrame
+    - sample_reference_df: 행 적고 텍스트 위주 참조형 DataFrame
 """
 
 import os
@@ -19,6 +23,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 # 프로젝트 루트를 sys.path에 추가 (테스트에서 모듈 임포트 가능하도록)
@@ -263,3 +268,97 @@ def tmp_watch_dir(tmp_path):
     watch_dir = tmp_path / "watch"
     watch_dir.mkdir()
     return str(watch_dir)
+
+
+# ============================================
+# Rich Catalog 샘플 데이터
+# ============================================
+
+@pytest.fixture
+def sample_rich_catalog_tables():
+    """Rich Catalog 메타데이터가 포함된 테이블 샘플 (list_tables() 반환 형식)."""
+    return [
+        {
+            "table_name": "sales",
+            "source_file": "/data/sales.csv",
+            "file_type": "csv",
+            "row_count": 15230,
+            "column_count": 5,
+            "columns_json": [
+                {"name": "id", "type": "BIGINT"},
+                {"name": "product_name", "type": "TEXT"},
+                {"name": "amount", "type": "DOUBLE PRECISION"},
+                {"name": "quantity", "type": "BIGINT"},
+                {"name": "sale_date", "type": "TIMESTAMPTZ"},
+            ],
+            "description": "2024년 2월 제품별 일별 매출 데이터",
+            "tags": ["매출", "제품", "월별"],
+            "column_descriptions": {
+                "id": "고유 식별자",
+                "product_name": "제품명",
+                "amount": "매출액(원)",
+                "quantity": "판매 수량",
+                "sale_date": "판매일자",
+            },
+        },
+        {
+            "table_name": "products",
+            "source_file": "/data/products.xlsx",
+            "file_type": "excel",
+            "row_count": 324,
+            "column_count": 4,
+            "columns_json": [
+                {"name": "id", "type": "BIGINT"},
+                {"name": "name", "type": "TEXT"},
+                {"name": "category", "type": "TEXT"},
+                {"name": "price", "type": "DOUBLE PRECISION"},
+            ],
+            "description": "전체 제품 마스터 데이터",
+            "tags": ["제품", "마스터", "카테고리"],
+            "column_descriptions": {
+                "id": "제품 ID",
+                "name": "제품명",
+                "category": "제품 카테고리",
+                "price": "단가(원)",
+            },
+        },
+    ]
+
+
+# ============================================
+# 스마트 분류기 테스트용 DataFrame 픽스처
+# ============================================
+
+@pytest.fixture
+def sample_statistics_df():
+    """숫자 비율이 높은 통계형 DataFrame (→ statistics)."""
+    return pd.DataFrame({
+        "id": range(1, 21),
+        "amount": [i * 1000 for i in range(1, 21)],
+        "quantity": [i * 5 for i in range(1, 21)],
+        "product": [f"제품{i}" for i in range(1, 21)],
+    })
+
+
+@pytest.fixture
+def sample_document_df():
+    """긴 텍스트가 포함된 문서형 DataFrame (→ document)."""
+    return pd.DataFrame({
+        "test_name": ["로그인 테스트", "로그아웃 테스트", "회원가입 테스트"],
+        "description": [
+            "사용자가 올바른 이메일과 비밀번호를 입력하여 시스템에 정상적으로 로그인할 수 있는지 확인하는 테스트",
+            "로그인 상태에서 로그아웃 버튼을 클릭하면 세션이 종료되고 로그인 페이지로 리다이렉트되는지 확인",
+            "새로운 사용자가 필수 필드를 입력하고 회원가입을 완료할 수 있는지 확인하는 테스트 케이스입니다",
+        ],
+        "expected_result": ["로그인 성공", "로그아웃 후 리다이렉트", "가입 성공 메시지"],
+    })
+
+
+@pytest.fixture
+def sample_reference_df():
+    """행이 적고 텍스트 위주인 참조형 DataFrame (→ reference)."""
+    return pd.DataFrame({
+        "code": ["A", "B", "C"],
+        "name": ["카테고리A", "카테고리B", "카테고리C"],
+        "description": ["첫번째", "두번째", "세번째"],
+    })

@@ -417,8 +417,11 @@ def _render_llm_settings_tab():
         st.error(f"설정 로드 실패: {e}")
         current_settings = {}
 
-    # 폐쇄망 모드 토글
+    # 환경 설정 섹션: 폐쇄망 + Ollama 실행 환경
     st.markdown("### 환경 설정")
+
+    _render_ollama_compute_status()
+
     airgapped = st.checkbox(
         "폐쇄망 모드",
         value=current_settings.get("airgapped_mode", "false").lower() == "true",
@@ -434,21 +437,23 @@ def _render_llm_settings_tab():
         st.markdown("### 오케스트레이터 설정")
         st.caption("의도 분류 등 간단한 작업에 사용됩니다. 상용 모델 사용 시 빠르고 정확한 분류가 가능합니다.")
 
+        _orch_providers = ["ollama", "openai", "anthropic", "huggingface"]
+        _orch_current = current_settings.get("orchestrator_provider", "ollama")
+        if _orch_current not in _orch_providers:
+            _orch_current = "ollama"
         orch_provider = st.selectbox(
             "프로바이더",
-            options=["ollama", "openai", "anthropic"],
-            index=["ollama", "openai", "anthropic"].index(
-                current_settings.get("orchestrator_provider", "ollama")
-            ),
+            options=_orch_providers,
+            index=_orch_providers.index(_orch_current),
             key="orch_provider",
             disabled=airgapped,
         )
 
         orch_model = st.text_input(
             "모델명",
-            value=current_settings.get("orchestrator_model", "exaone3.5:7.8b"),
+            value=current_settings.get("orchestrator_model", ""),
             key="orch_model",
-            help="Ollama: exaone3.5:7.8b | OpenAI: gpt-4o-mini | Anthropic: claude-3-5-haiku-20241022",
+            help="Ollama: gemma2:2b | OpenAI: gpt-4o-mini | Anthropic: claude-3-5-haiku-20241022 | HF: Qwen/Qwen2.5-72B-Instruct",
         )
 
         orch_base_url = st.text_input(
@@ -463,7 +468,7 @@ def _render_llm_settings_tab():
             value=current_settings.get("orchestrator_api_key", ""),
             type="password",
             key="orch_api_key",
-            help="OpenAI/Anthropic API 키 (Ollama는 불필요)",
+            help="OpenAI/Anthropic/HuggingFace API 키 (Ollama는 불필요)",
             disabled=orch_provider == "ollama",
         )
 
@@ -475,21 +480,23 @@ def _render_llm_settings_tab():
         st.markdown("### 에이전트 설정")
         st.caption("SQL 생성, RAG 등 데이터 처리에 사용됩니다. 민감 데이터 보호를 위해 로컬 모델을 권장합니다.")
 
+        _agent_providers = ["ollama", "openai", "anthropic", "huggingface"]
+        _agent_current = current_settings.get("agent_provider", "ollama")
+        if _agent_current not in _agent_providers:
+            _agent_current = "ollama"
         agent_provider = st.selectbox(
             "프로바이더",
-            options=["ollama", "openai", "anthropic"],
-            index=["ollama", "openai", "anthropic"].index(
-                current_settings.get("agent_provider", "ollama")
-            ),
+            options=_agent_providers,
+            index=_agent_providers.index(_agent_current),
             key="agent_provider",
             disabled=airgapped,
         )
 
         agent_model = st.text_input(
             "모델명",
-            value=current_settings.get("agent_model", "exaone3.5:7.8b"),
+            value=current_settings.get("agent_model", ""),
             key="agent_model",
-            help="Ollama: exaone3.5:7.8b | OpenAI: gpt-4o | Anthropic: claude-3-5-sonnet-20241022",
+            help="Ollama: gemma2:2b | OpenAI: gpt-4o | Anthropic: claude-3-5-sonnet-20241022 | HF: meta-llama/Llama-3.1-8B-Instruct",
         )
 
         agent_base_url = st.text_input(
@@ -504,7 +511,7 @@ def _render_llm_settings_tab():
             value=current_settings.get("agent_api_key", ""),
             type="password",
             key="agent_api_key",
-            help="OpenAI/Anthropic API 키 (Ollama는 불필요)",
+            help="OpenAI/Anthropic/HuggingFace API 키 (Ollama는 불필요)",
             disabled=agent_provider == "ollama",
         )
 
@@ -548,20 +555,96 @@ def _render_llm_settings_tab():
 | 환경 | 오케스트레이터 | 에이전트 |
 |------|---------------|----------|
 | **완전 폐쇄망** | Ollama | Ollama |
-| **제한적 인터넷** | OpenAI/Anthropic | Ollama (권장) |
-| **일반 환경** | OpenAI/Anthropic | Ollama 또는 상용 |
+| **제한적 인터넷** | OpenAI/Anthropic/HuggingFace | Ollama (권장) |
+| **일반 환경** | OpenAI/Anthropic/HuggingFace | Ollama 또는 상용/HF |
+| **GPU 없는 로컬** | HuggingFace (권장) | HuggingFace (권장) |
 
 **프로바이더별 모델 예시:**
 
-- **Ollama**: `exaone3.5:7.8b`, `llama3.1:8b`, `qwen2.5:7b`
+- **Ollama**: `gemma2:2b`, `llama3.1:8b`, `qwen2.5:7b`
 - **OpenAI**: `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`
 - **Anthropic**: `claude-3-5-sonnet-20241022`, `claude-3-5-haiku-20241022`
+- **HuggingFace**: `Qwen/Qwen2.5-72B-Instruct`, `meta-llama/Llama-3.1-8B-Instruct`, `mistralai/Mistral-7B-Instruct-v0.3`
+
+**HuggingFace Inference API:**
+- 무료 티어 사용 가능 (rate limit 있음)
+- API 키: https://huggingface.co/settings/tokens 에서 발급
+- 서버사이드 GPU 추론으로 로컬 GPU 없이도 빠른 응답 가능
+- base_url은 비워두면 됩니다 (기본 HF 엔드포인트 사용)
 
 **보안 고려사항:**
 - 에이전트는 스키마 정보와 쿼리 결과를 LLM에 전달합니다
 - 민감 데이터 보호를 위해 에이전트는 로컬 모델(Ollama) 사용을 권장합니다
 - 오케스트레이터는 질의 텍스트만 전달하므로 상용 모델 사용 시 위험이 낮습니다
+- HuggingFace도 외부 API이므로 민감 데이터 전송 시 주의가 필요합니다
         """)
+
+
+def _render_ollama_compute_status():
+    """Ollama GPU/CPU 실행 상태를 표시."""
+    try:
+        from agent._llm import check_ollama_compute_status
+        from config.settings import get_settings
+
+        settings = get_settings()
+        status = check_ollama_compute_status(settings.ollama.host)
+
+        if not status["connected"]:
+            st.warning(f"Ollama 연결 불가: {status['message']}")
+            return
+
+        device = status["compute_device"]
+        rec_timeout = status["recommended_timeout"]
+
+        # 실행 환경 표시
+        with st.container(border=True):
+            col_device, col_timeout, col_models = st.columns(3)
+
+            with col_device:
+                if device == "gpu":
+                    st.markdown("**실행 환경**")
+                    st.success(f"🚀 GPU 가속")
+                    if status.get("vram_used_mb"):
+                        st.caption(f"VRAM 사용: {status['vram_used_mb']}MB")
+                else:
+                    st.markdown("**실행 환경**")
+                    st.warning(f"🐢 CPU 모드")
+                    st.caption("GPU 미사용 — 응답 느림")
+
+            with col_timeout:
+                st.markdown("**타임아웃**")
+                current_timeout = settings.ollama.timeout
+                if device == "cpu" and current_timeout < rec_timeout:
+                    st.info(f"⏱ {rec_timeout}초 (자동 상향)")
+                    st.caption(f"env 설정: {current_timeout}초")
+                else:
+                    st.info(f"⏱ {current_timeout}초")
+
+            with col_models:
+                st.markdown("**로드된 모델**")
+                if status["loaded_models"]:
+                    for m in status["loaded_models"]:
+                        vram_info = ""
+                        if m["size_vram_mb"] > 0:
+                            vram_info = f" (VRAM {m['size_vram_mb']}MB)"
+                        else:
+                            vram_info = " (CPU)"
+                        st.caption(f"• {m['name']}{vram_info}")
+                else:
+                    st.caption("없음 (첫 요청 시 로드)")
+
+        # 설치된 모델 목록 (접을 수 있는 영역)
+        if status["installed_models"]:
+            with st.expander(f"설치된 모델 ({len(status['installed_models'])}개)"):
+                for m in status["installed_models"]:
+                    size_gb = m["size_mb"] / 1024
+                    st.caption(
+                        f"• **{m['name']}** — {size_gb:.1f}GB "
+                        f"({m['parameter_size']}, {m['family']})"
+                    )
+
+    except Exception as e:
+        st.warning(f"Ollama 환경 확인 실패: {e}")
 
 
 def _render_network_status():
@@ -572,7 +655,7 @@ def _render_network_status():
         from agent._llm import check_network_connectivity
         status = check_network_connectivity()
 
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
 
         with col1:
             if status["internet_available"]:
@@ -593,6 +676,12 @@ def _render_network_status():
                 st.warning("Anthropic: 접근 불가")
 
         with col4:
+            if status.get("huggingface_reachable"):
+                st.success("HuggingFace: 접근 가능")
+            else:
+                st.warning("HuggingFace: 접근 불가")
+
+        with col5:
             mode = status["recommended_mode"]
             if mode == "airgapped":
                 st.info("권장: 폐쇄망 모드")

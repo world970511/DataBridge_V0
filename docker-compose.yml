@@ -73,8 +73,8 @@ services:
     # Linux Docker Engine 사용 시 아래 주석 해제
     # (Docker Desktop은 host.docker.internal 기본 지원)
     # ============================================================
-    # extra_hosts:
-    #   - "host.docker.internal:host-gateway"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
       interval: 15s

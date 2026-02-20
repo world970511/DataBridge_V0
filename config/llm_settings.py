@@ -143,6 +143,26 @@ def save_all_llm_settings(settings: dict, updated_by: str = "admin") -> bool:
     return success
 
 
+def _backfill_empty_model_settings(db_settings: dict, settings) -> None:
+    """
+    DB의 모델 설정이 비어있으면 env 기본값으로 채우고 DB에 저장.
+
+    볼륨 재생성 후 init.sql이 모델명을 빈 문자열로 삽입하므로,
+    앱 첫 기동 시 환경변수(LLM_MODEL 등)의 값을 DB에 반영합니다.
+    이미 값이 있으면 아무것도 하지 않습니다.
+    """
+    backfill_map = {
+        "orchestrator_model": settings.ollama.model,
+        "agent_model": settings.ollama.model,
+    }
+
+    for key, env_value in backfill_map.items():
+        if not db_settings.get(key) and env_value:
+            logger.info(f"DB '{key}' is empty, backfilling from env: {env_value}")
+            save_llm_setting(key, env_value, updated_by="system")
+            db_settings[key] = env_value
+
+
 def apply_db_settings_to_config():
     """
     DB에 저장된 LLM 설정을 Settings 싱글톤에 적용.
@@ -162,22 +182,27 @@ def apply_db_settings_to_config():
 
     settings = get_settings()
 
+    # DB 모델값이 비어있으면 env 기본값으로 초기화 (볼륨 재생성 후 첫 실행 시)
+    _backfill_empty_model_settings(db_settings, settings)
+
     # 오케스트레이터 설정 적용
     if db_settings.get("orchestrator_provider"):
         settings.llm.orchestrator = LLMProviderConfig(
             provider=db_settings.get("orchestrator_provider", "ollama"),
-            model=db_settings.get("orchestrator_model", settings.ollama.model),
+            model=db_settings.get("orchestrator_model") or settings.ollama.model,
             api_key=db_settings.get("orchestrator_api_key", ""),
-            base_url=db_settings.get("orchestrator_base_url", settings.ollama.host),
+            # DB에 base_url이 비어있으면 환경변수(OLLAMA_HOST)에서 로드된 값 사용
+            base_url=db_settings.get("orchestrator_base_url") or settings.ollama.host,
         )
 
     # 에이전트 설정 적용
     if db_settings.get("agent_provider"):
         settings.llm.agent = LLMProviderConfig(
             provider=db_settings.get("agent_provider", "ollama"),
-            model=db_settings.get("agent_model", settings.ollama.model),
+            model=db_settings.get("agent_model") or settings.ollama.model,
             api_key=db_settings.get("agent_api_key", ""),
-            base_url=db_settings.get("agent_base_url", settings.ollama.host),
+            # DB에 base_url이 비어있으면 환경변수(OLLAMA_HOST)에서 로드된 값 사용
+            base_url=db_settings.get("agent_base_url") or settings.ollama.host,
         )
 
     # 폐쇄망 모드 적용

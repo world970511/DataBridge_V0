@@ -1,13 +1,15 @@
 """
 다중 프로바이더 LLM 래퍼 모듈.
 
-Ollama(로컬), OpenAI, Anthropic API를 통합하여 LLM 텍스트 생성을 수행합니다.
+Ollama(로컬), OpenAI, Anthropic, Hugging Face API를 통합하여
+LLM 텍스트 생성을 수행합니다.
 용도(purpose)에 따라 오케스트레이터용/에이전트용 모델을 자동으로 선택합니다.
 
 지원 프로바이더:
     - ollama: 로컬 Ollama 서버 (폐쇄망 환경 필수)
     - openai: OpenAI API (gpt-4o, gpt-4o-mini 등)
     - anthropic: Anthropic API (claude-3-5-sonnet 등)
+    - huggingface: Hugging Face Inference API (Qwen, Llama, Mistral 등)
 
 주요 함수:
     generate(prompt, system, purpose, temperature, timeout) -> str
@@ -48,7 +50,10 @@ from config.settings import get_settings, LLMProviderConfig
 logger = logging.getLogger(__name__)
 
 # 지원하는 프로바이더 목록
-SUPPORTED_PROVIDERS = ("ollama", "openai", "anthropic")
+SUPPORTED_PROVIDERS = ("ollama", "openai", "anthropic", "huggingface")
+
+# GPU/CPU 상태 캐시 (앱 실행 중 한 번만 감지)
+_compute_status_cache: dict | None = None
 
 # 용도별 역할
 Purpose = Literal["orchestrator", "agent"]
@@ -95,10 +100,6 @@ def generate(
         # DB 연결 실패 시 환경 변수 설정 사용
         settings = get_settings()
 
-    # 타임아웃 기본값
-    if timeout is None:
-        timeout = settings.ollama.timeout
-
     # 용도에 따른 설정 선택
     if purpose == "orchestrator":
         config = settings.llm.orchestrator
@@ -117,6 +118,13 @@ def generate(
             base_url=settings.ollama.host,
         )
 
+    # 타임아웃 결정: GPU/CPU에 따라 자동 조정
+    if timeout is None:
+        if config.provider == "ollama":
+            timeout = _get_adaptive_timeout(config.base_url, settings.ollama.timeout)
+        else:
+            timeout = settings.ollama.timeout
+
     # 프로바이더별 호출
     if config.provider == "ollama":
         return _generate_ollama(prompt, system, config, temperature, timeout)
@@ -124,9 +132,47 @@ def generate(
         return _generate_openai(prompt, system, config, temperature, timeout)
     elif config.provider == "anthropic":
         return _generate_anthropic(prompt, system, config, temperature, timeout)
+    elif config.provider == "huggingface":
+        return _generate_huggingface(prompt, system, config, temperature, timeout)
     else:
         logger.error(f"Unsupported LLM provider: {config.provider}")
         return ""
+
+
+def get_cached_compute_status(base_url: str = "") -> dict:
+    """
+    GPU/CPU 상태를 캐싱하여 반환. 앱 실행 중 첫 호출 시만 Ollama API를 조회.
+
+    Returns: check_ollama_compute_status()와 동일한 dict.
+    """
+    global _compute_status_cache
+    if _compute_status_cache is None:
+        _compute_status_cache = check_ollama_compute_status(base_url)
+        device = _compute_status_cache["compute_device"]
+        rec_timeout = _compute_status_cache["recommended_timeout"]
+        logger.info(
+            f"Compute device detected: {device}, "
+            f"recommended timeout: {rec_timeout}s"
+        )
+    return _compute_status_cache
+
+
+def _get_adaptive_timeout(base_url: str, env_timeout: int) -> int:
+    """
+    GPU/CPU 상태에 따라 적절한 타임아웃을 반환.
+
+    GPU 사용 시 env_timeout(기본 120s) 유지,
+    CPU 모드 시 max(env_timeout, 300s)로 상향.
+    """
+    try:
+        status = get_cached_compute_status(base_url)
+        recommended = status.get("recommended_timeout", 300)
+        # CPU 모드면 최소 300초 보장, GPU면 env 설정 존중
+        if status.get("compute_device") == "cpu":
+            return max(env_timeout, recommended)
+        return env_timeout
+    except Exception:
+        return env_timeout
 
 
 def _generate_ollama(
@@ -283,12 +329,64 @@ def _generate_anthropic(
         return ""
 
 
+def _generate_huggingface(
+    prompt: str,
+    system: str,
+    config: LLMProviderConfig,
+    temperature: float,
+    timeout: int,
+) -> str:
+    """Hugging Face Inference API를 호출하여 텍스트 생성."""
+    try:
+        from huggingface_hub import InferenceClient
+    except ImportError:
+        logger.error(
+            "huggingface_hub 패키지가 설치되지 않았습니다. "
+            "'pip install huggingface-hub'를 실행하세요."
+        )
+        return ""
+
+    if not config.api_key:
+        logger.error("Hugging Face API 키가 설정되지 않았습니다.")
+        return ""
+
+    try:
+        client = InferenceClient(
+            model=config.model,
+            token=config.api_key,
+            timeout=timeout,
+        )
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        response = client.chat_completion(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=4096,
+        )
+
+        result = response.choices[0].message.content or ""
+
+        logger.debug(
+            f"HuggingFace generate completed: model={config.model}, "
+            f"prompt_len={len(prompt)}, response_len={len(result)}"
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"HuggingFace API error: {e}")
+        return ""
+
+
 def check_provider_connection(provider: str, config: LLMProviderConfig) -> dict:
     """
     프로바이더 연결 상태를 확인.
 
     Args:
-        provider: 프로바이더 유형 ("ollama", "openai", "anthropic")
+        provider: 프로바이더 유형 ("ollama", "openai", "anthropic", "huggingface")
         config: 프로바이더 설정
 
     Returns:
@@ -348,7 +446,157 @@ def check_provider_connection(provider: str, config: LLMProviderConfig) -> dict:
         except ImportError:
             return {"connected": False, "message": "anthropic 패키지 미설치", "models": None}
 
+    elif provider == "huggingface":
+        if not config.api_key:
+            return {"connected": False, "message": "API 키 미설정", "models": None}
+        try:
+            from huggingface_hub import InferenceClient
+            client = InferenceClient(token=config.api_key, timeout=10)
+            # 간단한 연결 테스트: 텍스트 생성 가능 여부 확인
+            # list_deployed_models()로 Inference API에서 사용 가능한 모델 확인
+            try:
+                deployed = client.list_deployed_models(frameworks="text-generation-inference")
+                tgi_models = deployed.get("text-generation-inference", [])
+                # 인기 모델만 필터링하여 표시
+                popular_prefixes = (
+                    "Qwen/", "meta-llama/", "mistralai/", "google/",
+                    "microsoft/", "HuggingFaceH4/", "bigcode/",
+                )
+                filtered = [
+                    m for m in tgi_models
+                    if any(m.startswith(p) for p in popular_prefixes)
+                ][:15]
+                return {
+                    "connected": True,
+                    "message": f"연결됨 ({len(tgi_models)} 모델 사용 가능)",
+                    "models": filtered if filtered else tgi_models[:15],
+                }
+            except Exception:
+                # list_deployed_models 실패해도 API 키가 유효하면 연결 성공으로 간주
+                if config.api_key.startswith("hf_"):
+                    return {
+                        "connected": True,
+                        "message": "API 키 형식 확인됨",
+                        "models": [
+                            "Qwen/Qwen2.5-72B-Instruct",
+                            "meta-llama/Llama-3.1-8B-Instruct",
+                            "mistralai/Mistral-7B-Instruct-v0.3",
+                        ],
+                    }
+                return {"connected": False, "message": "API 키 검증 실패", "models": None}
+        except ImportError:
+            return {"connected": False, "message": "huggingface-hub 패키지 미설치", "models": None}
+        except Exception as e:
+            return {"connected": False, "message": str(e), "models": None}
+
     return {"connected": False, "message": f"지원하지 않는 프로바이더: {provider}", "models": None}
+
+
+def check_ollama_compute_status(base_url: str = "") -> dict:
+    """
+    Ollama 서버의 GPU/CPU 실행 상태를 확인.
+
+    /api/ps 엔드포인트로 현재 로드된 모델의 VRAM 사용량을 확인하고,
+    /api/tags로 설치된 모델 목록과 크기를 조회합니다.
+
+    Args:
+        base_url: Ollama 서버 URL. 비어있으면 settings에서 로드.
+
+    Returns:
+        {
+            "connected": bool,
+            "compute_device": "gpu" | "cpu" | "unknown",
+            "gpu_name": str | None,
+            "vram_total_mb": int | None,
+            "vram_used_mb": int | None,
+            "loaded_models": list[dict],  # name, size_mb, size_vram_mb
+            "installed_models": list[dict],  # name, size_mb, parameter_size
+            "recommended_timeout": int,  # GPU=120, CPU=300
+            "message": str,
+        }
+    """
+    if not base_url:
+        try:
+            settings = get_settings()
+            base_url = settings.ollama.host
+        except Exception:
+            base_url = "http://localhost:11434"
+
+    result = {
+        "connected": False,
+        "compute_device": "unknown",
+        "gpu_name": None,
+        "vram_total_mb": None,
+        "vram_used_mb": None,
+        "loaded_models": [],
+        "installed_models": [],
+        "recommended_timeout": 300,
+        "message": "",
+    }
+
+    # 1. 설치된 모델 목록 (/api/tags)
+    try:
+        resp = requests.get(f"{base_url}/api/tags", timeout=5)
+        if resp.status_code != 200:
+            result["message"] = f"Ollama 연결 실패 (HTTP {resp.status_code})"
+            return result
+
+        result["connected"] = True
+        models_data = resp.json().get("models", [])
+        result["installed_models"] = [
+            {
+                "name": m.get("name", ""),
+                "size_mb": round(m.get("size", 0) / (1024 * 1024)),
+                "parameter_size": m.get("details", {}).get("parameter_size", ""),
+                "family": m.get("details", {}).get("family", ""),
+            }
+            for m in models_data
+        ]
+    except requests.ConnectionError:
+        result["message"] = "Ollama 서버에 연결할 수 없습니다"
+        return result
+    except Exception as e:
+        result["message"] = f"Ollama 상태 확인 실패: {e}"
+        return result
+
+    # 2. 로드된 모델 상태 (/api/ps) — GPU/CPU 판별
+    try:
+        resp = requests.get(f"{base_url}/api/ps", timeout=5)
+        if resp.status_code == 200:
+            ps_data = resp.json().get("models", [])
+            total_vram = 0
+            for m in ps_data:
+                size_mb = round(m.get("size", 0) / (1024 * 1024))
+                vram_mb = round(m.get("size_vram", 0) / (1024 * 1024))
+                total_vram += vram_mb
+                result["loaded_models"].append({
+                    "name": m.get("name", ""),
+                    "size_mb": size_mb,
+                    "size_vram_mb": vram_mb,
+                })
+
+            if ps_data:
+                result["vram_used_mb"] = total_vram
+                if total_vram > 0:
+                    result["compute_device"] = "gpu"
+                    result["recommended_timeout"] = 120
+                    result["message"] = f"GPU 가속 사용 중 (VRAM {total_vram}MB 사용)"
+                else:
+                    result["compute_device"] = "cpu"
+                    result["recommended_timeout"] = 300
+                    result["message"] = "CPU 모드로 실행 중 (GPU 미사용, 응답 느림)"
+            else:
+                # 로드된 모델이 없으면 판별 불가, CPU로 간주
+                result["compute_device"] = "cpu"
+                result["recommended_timeout"] = 300
+                result["message"] = "현재 로드된 모델 없음 (첫 요청 시 로드)"
+    except Exception:
+        # /api/ps 실패해도 연결 자체는 되어 있으므로 CPU로 간주
+        result["compute_device"] = "cpu"
+        result["recommended_timeout"] = 300
+        result["message"] = "실행 상태 확인 불가 (CPU 모드로 간주)"
+
+    return result
 
 
 def check_network_connectivity() -> dict:
@@ -367,6 +615,7 @@ def check_network_connectivity() -> dict:
         "internet_available": False,
         "openai_reachable": False,
         "anthropic_reachable": False,
+        "huggingface_reachable": False,
         "recommended_mode": "airgapped",
     }
 
@@ -391,8 +640,15 @@ def check_network_connectivity() -> dict:
     except Exception:
         pass
 
+    # Hugging Face API 접근 가능 여부
+    try:
+        requests.get("https://huggingface.co", timeout=5)
+        result["huggingface_reachable"] = True
+    except Exception:
+        pass
+
     # 권장 모드 결정
-    if result["openai_reachable"] or result["anthropic_reachable"]:
+    if result["openai_reachable"] or result["anthropic_reachable"] or result["huggingface_reachable"]:
         result["recommended_mode"] = "hybrid"
 
     return result

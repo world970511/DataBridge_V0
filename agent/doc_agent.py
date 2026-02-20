@@ -38,15 +38,14 @@ from agent.tools.search_docs import search, format_search_results
 logger = logging.getLogger(__name__)
 
 # RAG 응답 생성을 위한 시스템 프롬프트.
-_RAG_SYSTEM_PROMPT = """당신은 문서 분석 전문가입니다.
-제공된 문서 내용을 바탕으로 사용자의 질문에 정확하게 답변합니다.
+_RAG_SYSTEM_PROMPT = """You are a document analysis expert.
+Answer the user's question accurately based on the provided document content.
 
-규칙:
-- 제공된 문서 내용에 근거하여 답변합니다
-- 문서에 없는 내용은 "문서에서 해당 정보를 찾지 못했습니다"라고 답변합니다
-- 여러 문서에서 관련 정보가 있으면 종합하여 답변합니다
-- 출처(문서명)를 가능하면 언급합니다
-- 한국어로 자연스럽게 답변합니다
+Rules:
+- Base your answers on the provided document content
+- If the information is not found in the documents, state "The requested information was not found in the documents"
+- If relevant information exists across multiple documents, synthesize them into a comprehensive answer
+- Mention the source (document name) whenever possible
 """
 
 # 온디맨드 파싱 시 LLM에 전달할 문서당 최대 문자 수
@@ -96,8 +95,8 @@ def process(question: str, n_results: int = 5) -> dict:
     if not results:
         return {
             "success": True,
-            "answer": "관련 문서를 찾지 못했습니다. 문서가 아직 업로드되지 않았거나, "
-                      "질문과 관련된 내용이 저장된 문서에 없을 수 있습니다.",
+            "answer": "관련 문서를 찾지 못했습니다. 아직 문서가 업로드되지 않았거나, "
+                      "저장된 문서에 질문과 관련된 내용이 없을 수 있습니다.",
             "sources": [],
             "search_count": 0,
             "agent": "document",
@@ -127,9 +126,9 @@ def process(question: str, n_results: int = 5) -> dict:
 
     # 6. LLM으로 RAG 응답 생성
     rag_prompt = (
-        f"다음은 검색된 관련 문서 내용입니다:\n\n"
+        f"Below is the content of related documents found:\n\n"
         f"{context_text}\n\n"
-        f"위 문서를 참고하여 다음 질문에 답변해 주세요:\n{question}"
+        f"Based on the documents above, please answer the following question:\n{question}"
     )
 
     answer = generate(
@@ -141,7 +140,7 @@ def process(question: str, n_results: int = 5) -> dict:
 
     if not answer:
         answer = (
-            "LLM 응답 생성에 실패했습니다. 검색된 문서 내용을 직접 확인해 주세요:\n\n"
+            "LLM 응답을 생성하지 못했습니다. 검색된 문서 내용을 직접 확인해 주세요:\n\n"
             f"{context_text}"
         )
 
