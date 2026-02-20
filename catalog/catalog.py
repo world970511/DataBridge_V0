@@ -27,6 +27,14 @@ def register_table(
     row_count: int,
     column_count: int,
     columns_json: list[dict],
+    # Rich Catalog 신규 필드 (기본값 None으로 하위 호환성 유지)
+    description: Optional[str] = None,
+    data_category: Optional[str] = None,
+    tags: Optional[list] = None,
+    column_descriptions: Optional[dict] = None,
+    sample_values: Optional[dict] = None,
+    numeric_ratio: Optional[float] = None,
+    avg_text_length: Optional[float] = None,
 ):
     """
     테이블 메타데이터를 catalog_tables에 UPSERT(INSERT 또는 UPDATE).
@@ -34,19 +42,31 @@ def register_table(
     동일한 table_name이 이미 존재하면 source_file, row_count 등을 갱신하고
     updated_at을 현재 시각으로 업데이트합니다. columns_json은 컬럼명과 dtype을
     담은 딕셔너리 리스트를 JSON 문자열로 변환하여 저장합니다.
+
+    Rich Catalog 필드(description, tags 등)가 None이면 기존 값을 유지합니다
+    (COALESCE 패턴). 이를 통해 기존 코드에서 새 필드 없이 호출해도 정상 동작합니다.
     """
     with get_cursor() as cur:
         cur.execute(
             """
             INSERT INTO catalog_tables
-                (table_name, source_file, file_type, row_count, column_count, columns_json)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (table_name, source_file, file_type, row_count, column_count,
+                 columns_json, description, data_category, tags,
+                 column_descriptions, sample_values, numeric_ratio, avg_text_length)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (table_name) DO UPDATE SET
                 source_file = EXCLUDED.source_file,
                 file_type = EXCLUDED.file_type,
                 row_count = EXCLUDED.row_count,
                 column_count = EXCLUDED.column_count,
                 columns_json = EXCLUDED.columns_json,
+                description = COALESCE(EXCLUDED.description, catalog_tables.description),
+                data_category = COALESCE(EXCLUDED.data_category, catalog_tables.data_category),
+                tags = COALESCE(EXCLUDED.tags, catalog_tables.tags),
+                column_descriptions = COALESCE(EXCLUDED.column_descriptions, catalog_tables.column_descriptions),
+                sample_values = COALESCE(EXCLUDED.sample_values, catalog_tables.sample_values),
+                numeric_ratio = COALESCE(EXCLUDED.numeric_ratio, catalog_tables.numeric_ratio),
+                avg_text_length = COALESCE(EXCLUDED.avg_text_length, catalog_tables.avg_text_length),
                 updated_at = NOW()
             """,
             (
@@ -56,21 +76,33 @@ def register_table(
                 row_count,
                 column_count,
                 json.dumps(columns_json, ensure_ascii=False),
+                description,
+                data_category,
+                tags,  # psycopg2가 Python list → PostgreSQL TEXT[] 자동 변환
+                json.dumps(column_descriptions, ensure_ascii=False) if column_descriptions else None,
+                json.dumps(sample_values, ensure_ascii=False) if sample_values else None,
+                numeric_ratio,
+                avg_text_length,
             ),
         )
-    logger.info(f"Table registered in catalog: {table_name}")
+    logger.info(f"Table registered in catalog: {table_name} (category={data_category})")
 
 
 def list_tables() -> list[dict]:
     """
     catalog_tables에 등록된 모든 테이블의 메타데이터를 updated_at 내림차순으로 조회.
 
-    Returns: 테이블명, 원본 파일, 행/컬럼 수 등을 담은 딕셔너리 리스트.
+    Rich Catalog 필드(description, data_category, tags, column_descriptions,
+    sample_values, numeric_ratio, avg_text_length)도 함께 반환합니다.
+
+    Returns: 테이블명, 원본 파일, 행/컬럼 수, Rich Catalog 필드 등을 담은 딕셔너리 리스트.
     """
     return execute_query(
         """
         SELECT table_name, source_file, file_type, row_count, column_count,
-               columns_json, created_at, updated_at
+               columns_json, description, data_category, tags,
+               column_descriptions, sample_values, numeric_ratio, avg_text_length,
+               created_at, updated_at
         FROM catalog_tables
         ORDER BY updated_at DESC
         """
@@ -220,3 +252,19 @@ def get_catalog_summary() -> dict:
         "total_tables": tables[0]["cnt"] if tables else 0,
         "total_documents": docs[0]["cnt"] if docs else 0,
     }
+
+
+def get_table_tags() -> dict:
+    """
+    모든 테이블의 태그 매핑을 반환.
+
+    오케스트레이터의 의도 분류 시 사용자 질의에 포함된 태그를 매칭하여
+    데이터 조회 의도를 강화하는 데 사용됩니다.
+
+    Returns: {"table_name": ["tag1", "tag2", ...], ...} 형태의 딕셔너리.
+             태그가 없는 테이블은 제외됩니다.
+    """
+    rows = execute_query(
+        "SELECT table_name, tags FROM catalog_tables WHERE tags IS NOT NULL"
+    )
+    return {r["table_name"]: r["tags"] or [] for r in rows}

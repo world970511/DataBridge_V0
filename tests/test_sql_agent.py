@@ -123,7 +123,7 @@ class TestSqlAgentProcessSafe:
     @patch("agent.sql_agent.log_action")
     def test_no_tables_available(self, mock_log, mock_schema, mock_gen):
         """테이블이 없으면 안내 메시지를 반환합니다."""
-        mock_schema.return_value = "등록된 테이블이 없습니다."
+        mock_schema.return_value = "No tables registered."
 
         result = process("매출 보여줘")
 

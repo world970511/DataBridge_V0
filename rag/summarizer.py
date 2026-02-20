@@ -16,34 +16,33 @@ import re
 logger = logging.getLogger(__name__)
 
 # LLM 요약 생성용 시스템 프롬프트
-_SUMMARY_SYSTEM_PROMPT = """당신은 문서 요약 전문가입니다.
-주어진 문서 텍스트를 300자 이내로 요약하세요.
+_SUMMARY_SYSTEM_PROMPT = """You are a document summarization expert.
+Summarize the given document text in 300 characters or less.
 
-규칙:
-- 문서의 주제와 핵심 내용을 포함합니다
-- 주요 키워드를 반드시 포함합니다
-- 한국어로 작성합니다
-- 간결하고 명확하게 작성합니다
+Rules:
+- Include the document's topic and key content
+- Must include important keywords
+- Write concisely and clearly
 """
 
 # LLM에 전달할 텍스트 최대 길이 (토큰/지연 절감)
-_LLM_INPUT_MAX_CHARS = 3000
+_LLM_INPUT_MAX_CHARS = 2000
 
 # 폴백 요약에서 사용할 본문 앞부분 길이
-_FALLBACK_HEAD_CHARS = 1000
+_FALLBACK_HEAD_CHARS = 500
 
 
-def generate_summary(text: str, source: str = "", max_chars: int = 1500) -> str:
+def generate_summary(text: str, source: str = "", max_chars: int = 1000) -> str:
     """
     문서 텍스트로부터 검색용 요약을 생성.
 
     1차: LLM에 요약 요청 (300자 이내 요약 + 주요 키워드).
-    폴백: LLM 실패 시 첫 1000자 + 섹션 제목 추출 결과를 결합.
+    폴백: LLM 실패 시 첫 500자 + 섹션 제목 추출 결과를 결합.
 
     Args:
         text: 전체 문서 텍스트.
         source: 문서 파일명 (로깅용).
-        max_chars: 요약 최대 길이 (기본 1500자).
+        max_chars: 요약 최대 길이 (기본 1000자).
 
     Returns:
         요약 텍스트 문자열. 빈 텍스트 입력 시 빈 문자열.
@@ -72,7 +71,7 @@ def _summarize_with_llm(text: str, max_chars: int) -> str:
     from agent._llm import generate
 
     truncated = text[:_LLM_INPUT_MAX_CHARS]
-    prompt = f"다음 문서를 요약하세요:\n\n{truncated}"
+    prompt = f"Summarize the following document:\n\n{truncated}"
 
     result = generate(
         prompt=prompt,

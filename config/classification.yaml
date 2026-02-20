@@ -1,12 +1,44 @@
+# ==========================================================================
+# 파일 분류 규칙 — watcher/classifier.py에서 사용
+# ==========================================================================
+#
+# 파일 확장자 기반으로 1차 분류를 수행합니다:
+#   - load_to_db:          CSV/Excel → PostgreSQL 테이블 적재
+#   - register_for_search: PDF/DOCX/TXT → 텍스트 추출 후 ChromaDB 임베딩
+#   - ignore:              임시/시스템 파일 → 처리하지 않음
+#
+# --------------------------------------------------------------------------
+# 스마트 분류기 (Smart Classifier)
+# --------------------------------------------------------------------------
+# load_to_db로 분류된 CSV/Excel 파일은 추가로 **내용 분석**을 거칩니다.
+# watcher/content_analyzer.py가 DataFrame의 숫자 비율, 텍스트 길이 등을
+# 분석하여 다음과 같이 자동 라우팅합니다:
+#
+#   [확장자 분류]        [내용 분석 결과]          [최종 경로]
+#   *.csv/*.xlsx  →  numeric_ratio >= 0.5     → PostgreSQL (statistics)
+#                    avg_text_length > 50      → ChromaDB   (document)
+#                    row_count < 5, 텍스트 위주 → ChromaDB   (reference)
+#                    기본값                    → PostgreSQL (statistics)
+#
+# 따라서 테스트 케이스, 체크리스트, 회의록 등 문서형 스프레드시트는
+# 자동으로 시맨틱 검색(ChromaDB)으로 전환되어 더 유용한 검색이 가능합니다.
+#
+# 분류 기준 세부 규칙 (watcher/content_analyzer.py):
+#   - numeric_ratio >= 0.5 AND row_count >= 10 → "statistics" (DB 적재)
+#   - avg_text_length > 50 OR has_long_text(100자 초과) → "document" (ChromaDB)
+#   - row_count < 5 AND numeric_ratio < 0.3 → "reference" (ChromaDB)
+#   - 기본값 → "statistics" (DB 적재, 기존 동작 유지)
+# --------------------------------------------------------------------------
+
 rules:
-  # 정형 데이터 → DB 적재
+  # 무시할 파일 (임시 파일, 시스템 파일, 잠금 파일) — 가장 먼저 체크
+  - patterns: ["~$*", "*.tmp", "Thumbs.db", ".DS_Store", "*.swp", "*.lock"]
+    action: ignore
+
+  # 정형 데이터 → DB 적재 (스마트 분류기가 내용 분석 후 문서형이면 ChromaDB로 전환)
   - patterns: ["*.xlsx", "*.xls", "*.csv", "*.tsv"]
     action: load_to_db
 
-  # 비정형 문서 → 검색 등록
+  # 비정형 문서 → 검색 등록 (요약 임베딩 + 온디맨드 파싱)
   - patterns: ["*.pdf", "*.hwp", "*.hwpx", "*.docx", "*.txt"]
     action: register_for_search
-
-  # 무시할 파일
-  - patterns: ["~$*", "*.tmp", "Thumbs.db", ".DS_Store", "*.swp", "*.lock"]
-    action: ignore

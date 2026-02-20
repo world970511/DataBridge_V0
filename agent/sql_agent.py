@@ -47,30 +47,30 @@ logger = logging.getLogger(__name__)
 # SQL 에이전트의 시스템 프롬프트 템플릿.
 # SELECT뿐 아니라 CREATE, INSERT, DELETE 등도 허용하되,
 # 실제 실행 여부는 sql_classifier에 의해 결정됩니다.
-_SQL_SYSTEM_PROMPT = """당신은 PostgreSQL SQL 전문가입니다.
-사용자의 자연어 질문을 정확한 SQL로 변환합니다.
+_SQL_SYSTEM_PROMPT = """You are a PostgreSQL SQL expert.
+Convert the user's natural language question into accurate SQL.
 
-규칙:
-- 사용자가 데이터 조회를 요청하면 SELECT 쿼리를 작성합니다
-- 사용자가 데이터 삭제/수정/생성을 요청하면 해당하는 SQL(DELETE, UPDATE, CREATE, INSERT 등)을 작성합니다
-- SQL은 반드시 ```sql 코드블록으로 감싸서 응답합니다
-- 테이블명과 컬럼명은 아래 스키마 정보를 정확히 참조합니다
-- 쿼리 문 작성 시 주석을 달지 않습니다.
-- 한국어 질문에 대해 한국어 별칭(alias)을 적절히 사용합니다
-- 집계 함수 사용 시 적절한 GROUP BY를 포함합니다
-- 결과가 너무 많을 수 있으면 LIMIT을 추가합니다
+Rules:
+- Write SELECT queries when the user requests data retrieval
+- Write appropriate SQL (DELETE, UPDATE, CREATE, INSERT, etc.) when the user requests data modification/creation/deletion
+- Always wrap SQL in ```sql code blocks
+- Reference the table names and column names from the schema information below exactly
+- Do not add comments in SQL queries
+- Use appropriate column aliases that match the user's language
+- Include proper GROUP BY when using aggregate functions
+- Add LIMIT when results might be too many
 
 {schema}
 """
 
 # SQL 실행 결과를 요약하기 위한 시스템 프롬프트.
-_SUMMARY_SYSTEM_PROMPT = """당신은 데이터 분석 결과를 설명하는 전문가입니다.
-SQL 쿼리 실행 결과를 사용자가 이해하기 쉬운 한국어로 요약합니다.
+_SUMMARY_SYSTEM_PROMPT = """You are an expert at explaining data analysis results.
+Summarize SQL query results in a clear, user-friendly manner.
 
-규칙:
-- 핵심 수치와 인사이트를 간결하게 전달합니다
-- 행 수가 많으면 주요 패턴이나 상위/하위 항목을 강조합니다
-- 전문 용어보다 일상적인 표현을 사용합니다
+Rules:
+- Convey key numbers and insights concisely
+- When there are many rows, highlight major patterns or top/bottom items
+- Use everyday language rather than technical jargon
 """
 
 
@@ -113,9 +113,9 @@ def process(question: str, user_id: str = "system") -> dict:
 
     # 2. 스키마 로드
     schema = get_all_tables_summary()
-    if schema == "등록된 테이블이 없습니다.":
+    if schema == "No tables registered.":
         return _error_result(
-            "데이터베이스에 등록된 테이블이 없습니다. 먼저 데이터 파일을 업로드해 주세요.",
+            "등록된 테이블이 없습니다. 먼저 데이터 파일을 업로드해 주세요.",
             question,
             user_id=user_id,
         )
@@ -123,7 +123,7 @@ def process(question: str, user_id: str = "system") -> dict:
     # 3. LLM으로 SQL 생성 (에이전트용 모델 사용 - 데이터 보안)
     system_prompt = _SQL_SYSTEM_PROMPT.format(schema=schema)
     llm_response = generate(
-        prompt=f"다음 질문을 SQL로 변환해 주세요:\n\n{question}",
+        prompt=f"Convert the following question to SQL:\n\n{question}",
         system=system_prompt,
         purpose="agent",  # 에이전트용 모델 (로컬 모델 권장 - 스키마 정보 보호)
         temperature=0.1,
@@ -131,7 +131,7 @@ def process(question: str, user_id: str = "system") -> dict:
 
     if not llm_response:
         return _error_result(
-            "LLM 서버에 연결할 수 없습니다. Ollama 서비스 상태를 확인해 주세요.",
+            "LLM 서버에 연결할 수 없습니다. Ollama 서비스가 실행 중인지 확인하세요.",
             question,
             user_id=user_id,
         )
@@ -202,7 +202,7 @@ def _handle_safe(question: str, sql: str, user_id: str) -> dict:
             user_id=user_id,
         )
         return _error_result(
-            f"생성된 SQL이 보안 검증을 통과하지 못했습니다: {validation_msg}",
+            f"생성된 SQL이 보안 검증에 실패했습니다: {validation_msg}",
             question,
             sql=sql,
             user_id=user_id,
@@ -278,7 +278,7 @@ def _handle_auto_allowed(question: str, sql: str, user_id: str) -> dict:
             user_id=user_id,
         )
 
-    answer = f"✅ SQL이 성공적으로 실행되었습니다. ({exec_result['rows_affected']}행 영향받음)"
+    answer = f"✅ SQL 실행 완료. ({exec_result['rows_affected']}행 영향)"
 
     log_action(
         action_type="sql_execute",
@@ -329,7 +329,7 @@ def _handle_needs_approval(
             f"관리자가 '승인 관리' 페이지에서 승인하면 실행됩니다."
         )
     else:
-        answer = "승인 요청을 생성하지 못했습니다. 시스템 관리자에게 문의해 주세요."
+        answer = "승인 요청 생성에 실패했습니다. 시스템 관리자에게 문의하세요."
 
     return {
         "success": True,  # 요청 생성 자체는 성공
@@ -358,7 +358,7 @@ def _handle_forbidden(question: str, sql: str, user_id: str, reason: str) -> dic
     )
 
     return _error_result(
-        f"⛔ 이 SQL은 보안 정책에 의해 차단되었습니다: {reason}",
+        f"⛔ This SQL has been blocked by security policy: {reason}",
         question,
         sql=sql,
         user_id=user_id,
@@ -453,10 +453,10 @@ def _summarize_results(question: str, sql: str, exec_result: dict) -> str:
         truncation_note = f"\n(참고: 전체 {row_count}행 중 상위 20행의 데이터입니다)"
 
     summary_prompt = (
-        f"사용자 질문: {question}\n"
-        f"실행된 SQL: {sql}\n"
-        f"결과 ({row_count}행):\n{data_text}{truncation_note}\n\n"
-        "위 데이터를 바탕으로 사용자 질문에 대한 답변을 작성해 주세요."
+        f"User question: {question}\n"
+        f"Executed SQL: {sql}\n"
+        f"Results ({row_count} rows):\n{data_text}{truncation_note}\n\n"
+        "Based on the data above, write an answer to the user's question."
     )
 
     summary = generate(
@@ -469,10 +469,10 @@ def _summarize_results(question: str, sql: str, exec_result: dict) -> str:
     if summary:
         return summary
 
-    # LLM 요약 실패 시 기본 메시지
-    fallback = f"쿼리 결과: {row_count}행이 조회되었습니다."
+    # LLM summary fallback
+    fallback = f"쿼리 결과: {row_count}행이 반환되었습니다."
     if truncated:
-        fallback += " (결과가 너무 많아 일부만 표시됩니다)"
+        fallback += " (데이터가 많아 일부만 표시되었습니다)"
     return fallback
 
 

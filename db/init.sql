@@ -31,9 +31,20 @@ CREATE TABLE IF NOT EXISTS catalog_tables (
     row_count       INTEGER DEFAULT 0,
     column_count    INTEGER DEFAULT 0,
     columns_json    JSONB,
+    -- Rich Catalog 메타데이터 (스마트 분류 + LLM 생성)
+    description         TEXT,                               -- 데이터 설명 (LLM 생성, 예: "2월 제품별 일별 매출 데이터")
+    data_category       VARCHAR(50) DEFAULT 'statistics',   -- statistics | document | reference | log
+    tags                TEXT[],                             -- 검색용 태그 배열 (예: {'매출','제품','월별'})
+    column_descriptions JSONB,                              -- 컬럼별 설명 (예: {"amount": "매출액(원)"})
+    sample_values       JSONB,                              -- 컬럼별 샘플 값 (예: {"product": ["A상품","B상품"]})
+    numeric_ratio       FLOAT,                              -- 숫자 컬럼 비율 (0.0~1.0, 스마트 분류 근거)
+    avg_text_length     FLOAT,                              -- 텍스트 셀 평균 길이 (스마트 분류 근거)
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- 태그 기반 검색을 위한 GIN 인덱스
+CREATE INDEX IF NOT EXISTS idx_catalog_tables_tags ON catalog_tables USING GIN (tags);
 
 CREATE TABLE IF NOT EXISTS catalog_documents (
     id              SERIAL PRIMARY KEY,
@@ -47,9 +58,19 @@ CREATE TABLE IF NOT EXISTS catalog_documents (
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 기존 배포 마이그레이션:
+-- 기존 배포 마이그레이션 (catalog_documents):
 -- ALTER TABLE catalog_documents ADD COLUMN IF NOT EXISTS summary_text TEXT;
 -- ALTER TABLE catalog_documents ADD CONSTRAINT uq_catalog_documents_source_file UNIQUE (source_file);
+
+-- 기존 배포 마이그레이션 (Rich Catalog):
+-- ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS description TEXT;
+-- ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS data_category VARCHAR(50) DEFAULT 'statistics';
+-- ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS tags TEXT[];
+-- ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS column_descriptions JSONB;
+-- ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS sample_values JSONB;
+-- ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS numeric_ratio FLOAT;
+-- ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS avg_text_length FLOAT;
+-- CREATE INDEX IF NOT EXISTS idx_catalog_tables_tags ON catalog_tables USING GIN (tags);
 
 -- ============================================
 -- 2. 감사 로그 (모든 질의/승인/실행 이력)
@@ -173,12 +194,12 @@ CREATE TABLE IF NOT EXISTS llm_settings (
 -- 초기 설정값 삽입 (ON CONFLICT로 중복 방지)
 INSERT INTO llm_settings (setting_key, setting_value, description) VALUES
     ('orchestrator_provider', 'ollama', '오케스트레이터 LLM 프로바이더 (ollama/openai/anthropic)'),
-    ('orchestrator_model', 'exaone3.5:7.8b', '오케스트레이터 LLM 모델명'),
+    ('orchestrator_model', '', '오케스트레이터 LLM 모델명 (비어 있으면 앱 시작 시 env에서 자동 설정)'),
     ('orchestrator_api_key', '', '오케스트레이터 API 키 (상용 모델용)'),
-    ('orchestrator_base_url', 'http://localhost:11434', '오케스트레이터 API URL'),
+    ('orchestrator_base_url', '', '오케스트레이터 API URL (비어 있으면 OLLAMA_HOST 환경변수 사용)'),
     ('agent_provider', 'ollama', '에이전트 LLM 프로바이더 (ollama/openai/anthropic)'),
-    ('agent_model', 'exaone3.5:7.8b', '에이전트 LLM 모델명'),
+    ('agent_model', '', '에이전트 LLM 모델명 (비어 있으면 앱 시작 시 env에서 자동 설정)'),
     ('agent_api_key', '', '에이전트 API 키 (상용 모델용)'),
-    ('agent_base_url', 'http://localhost:11434', '에이전트 API URL'),
+    ('agent_base_url', '', '에이전트 API URL (비어 있으면 OLLAMA_HOST 환경변수 사용)'),
     ('airgapped_mode', 'false', '폐쇄망 모드 (true면 상용 API 비활성화)')
 ON CONFLICT (setting_key) DO NOTHING;

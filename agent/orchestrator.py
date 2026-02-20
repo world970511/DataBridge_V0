@@ -20,6 +20,7 @@ DataBridge AI 에이전트의 진입점(entry point)입니다. 사용자의 자�
     - agent._llm: generate() — LLM 호출 (의도 분류 폴백용)
     - agent._audit: log_action() — 감사 로그 기록
     - agent.tools.list_tables: get_table_names() — 카탈로그 테이블명 조회
+    - agent.tools.list_tables: get_table_tags() — 카탈로그 태그 매핑 조회
     - agent.tools.search_docs: get_document_names() — 카탈로그 문서명 조회
 
 사용 예시:
@@ -33,8 +34,9 @@ import logging
 
 from agent._llm import generate
 from agent._audit import log_action
-from agent.tools.list_tables import get_table_names
+from agent.tools.list_tables import get_table_names, get_table_tags
 from agent.tools.search_docs import get_document_names
+from agent.translator import detect_language, translate_if_needed
 from agent import sql_agent, doc_agent
 
 logger = logging.getLogger(__name__)
@@ -86,14 +88,14 @@ _LIST_KEYWORDS: list[str] = [
 _SCORE_THRESHOLD = 3
 
 # LLM 의도 분류용 시스템 프롬프트.
-_CLASSIFY_SYSTEM_PROMPT = """사용자의 질문 의도를 분류하세요.
+_CLASSIFY_SYSTEM_PROMPT = """Classify the intent of the user's question.
 
-분류:
-- DATA: 데이터베이스 테이블에서 데이터를 조회/분석하는 질문 (SQL 필요)
-- DOCUMENT: 업로드된 문서(PDF, DOCX 등)에서 정보를 검색/요약하는 질문
-- BOTH: 데이터 조회와 문서 검색 모두 필요한 복합 질문
+Categories:
+- DATA: Questions that query/analyze data from database tables (requires SQL)
+- DOCUMENT: Questions that search/summarize information from uploaded documents (PDF, DOCX, etc.)
+- BOTH: Complex questions that require both data query and document search
 
-반드시 DATA, DOCUMENT, BOTH 중 하나만 대문자로 응답하세요. 다른 텍스트를 추가하지 마세요.
+You MUST respond with exactly one of DATA, DOCUMENT, or BOTH in uppercase. Do not add any other text.
 """
 
 
@@ -134,6 +136,9 @@ def process_query(question: str, user_id: str = "system") -> dict:
             "doc_result": dict | None,  — 문서 에이전트 결과
         }
     """
+    # 사용자 입력 언어 감지 (영어가 아니면 최종 응답 번역)
+    query_lang = detect_language(question)
+
     intent = classify_intent(question)
 
     log_action(
@@ -141,10 +146,10 @@ def process_query(question: str, user_id: str = "system") -> dict:
         query_text=question,
         status="success",
         user_id=user_id,
-        metadata={"intent": intent},
+        metadata={"intent": intent, "query_lang": query_lang},
     )
 
-    logger.info(f"Query intent classified: intent={intent}, question='{question[:50]}...'")
+    logger.info(f"Query intent classified: intent={intent}, lang={query_lang}, question='{question[:50]}...'")
 
     # 목록 조회 의도 처리 (파싱 없이 카탈로그만 조회)
     if intent.startswith("list"):
@@ -153,15 +158,17 @@ def process_query(question: str, user_id: str = "system") -> dict:
     if intent == "data":
         result = sql_agent.process(question, user_id=user_id)
         result["intent"] = "data"
-        return result
-
     elif intent == "document":
         result = doc_agent.process(question)
         result["intent"] = "document"
-        return result
-
     else:  # composite
-        return _process_composite(question, user_id=user_id)
+        result = _process_composite(question, user_id=user_id)
+
+    # 영어가 아닌 경우 최종 응답을 사용자 언어로 번역
+    if query_lang != "en" and result.get("answer"):
+        result["answer"] = translate_if_needed(result["answer"], query_lang)
+
+    return result
 
 
 def classify_intent(question: str) -> str:
@@ -174,7 +181,8 @@ def classify_intent(question: str) -> str:
 
     1단계 — 규칙 기반 (빠른 경로):
         - 질의에 포함된 키워드의 점수를 합산 (_DATA_KEYWORDS, _DOC_KEYWORDS)
-        - 카탈로그에 등록된 테이블명/문서명이 질의에 포함되어 있으면 가산점 부여
+        - 카탈로그에 등록된 테이블명/문서명이 질의에 포함되어 있으면 가산점 부여 (+5)
+        - Rich Catalog 태그가 질의에 포함되어 있으면 추가 가산점 부여 (+3)
         - 두 점수의 차이가 _SCORE_THRESHOLD(기본 3) 이상이면 즉시 분류
 
     2단계 — LLM 폴백 (느린 경로):
@@ -218,6 +226,14 @@ def classify_intent(question: str) -> str:
         if name.lower() in question_lower:
             data_score += 5  # 테이블명 매칭은 강력한 신호
 
+    # Rich Catalog 태그 매칭 가산점
+    table_tags = get_table_tags()
+    for _table_name, tags in table_tags.items():
+        for tag in tags:
+            if tag.lower() in question_lower:
+                data_score += 3  # 태그 매칭은 중간 수준의 신호
+                break  # 테이블당 최대 1회 가산
+
     doc_names = get_document_names()
     for name in doc_names:
         # 확장자 제거 후 매칭 (예: "report.pdf" → "report")
@@ -259,7 +275,7 @@ def _classify_with_llm(question: str) -> str:
         분류된 의도: "data", "document", 또는 "composite".
     """
     response = generate(
-        prompt=f"사용자 질문: {question}",
+        prompt=f"User question: {question}",
         system=_CLASSIFY_SYSTEM_PROMPT,
         purpose="orchestrator",  # 오케스트레이터용 모델 사용
         temperature=0.0,
@@ -372,31 +388,40 @@ def _process_list_query(intent: str, question: str) -> dict:
     documents = []
     answer_parts = []
 
-    # 테이블 목록 조회
+    # 테이블 목록 조회 (Rich Catalog 정보 포함)
     if intent in ("list_data", "list_all"):
         try:
             tables = list_tables()
             if tables:
-                table_lines = [f"  - {t['table_name']} ({t['row_count']}행, {t['column_count']}컬럼)" for t in tables]
-                answer_parts.append(f"📊 등록된 테이블 ({len(tables)}개):\n" + "\n".join(table_lines))
+                table_lines = []
+                for t in tables:
+                    line = f"  - {t['table_name']} ({t['row_count']} rows, {t['column_count']} columns)"
+                    desc = t.get("description")
+                    tags = t.get("tags")
+                    if desc:
+                        line += f"\n    Description: {desc}"
+                    if tags:
+                        line += f"\n    Tags: {', '.join(tags)}"
+                    table_lines.append(line)
+                answer_parts.append(f"📊 Registered Tables ({len(tables)}):\n" + "\n".join(table_lines))
             else:
-                answer_parts.append("📊 등록된 테이블이 없습니다.")
+                answer_parts.append("📊 No registered tables.")
         except Exception as e:
             logger.error(f"Failed to list tables: {e}")
-            answer_parts.append("📊 테이블 목록 조회 중 오류가 발생했습니다.")
+            answer_parts.append("📊 Error occurred while listing tables.")
 
     # 문서 목록 조회
     if intent in ("list_doc", "list_all"):
         try:
             documents = list_documents()
             if documents:
-                doc_lines = [f"  - {d['doc_name']} ({d['file_type']}, {d['chunk_count']} 청크)" for d in documents]
-                answer_parts.append(f"📄 등록된 문서 ({len(documents)}개):\n" + "\n".join(doc_lines))
+                doc_lines = [f"  - {d['doc_name']} ({d['file_type']}, {d['chunk_count']} chunks)" for d in documents]
+                answer_parts.append(f"📄 Registered Documents ({len(documents)}):\n" + "\n".join(doc_lines))
             else:
-                answer_parts.append("📄 등록된 문서가 없습니다.")
+                answer_parts.append("📄 No registered documents.")
         except Exception as e:
             logger.error(f"Failed to list documents: {e}")
-            answer_parts.append("📄 문서 목록 조회 중 오류가 발생했습니다.")
+            answer_parts.append("📄 Error occurred while listing documents.")
 
     answer = "\n\n".join(answer_parts) if answer_parts else "목록 정보를 가져올 수 없습니다."
 
