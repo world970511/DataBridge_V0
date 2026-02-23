@@ -1,8 +1,8 @@
 """
-SQL 승인 요청 관리 모듈.
+승인 요청 관리 모듈.
 
-위험 SQL(DROP/DELETE/TRUNCATE/ALTER)에 대한 승인 요청을 생성·조회·처리하고,
-승인된 SQL을 실행하는 Human-in-the-Loop 워크플로우를 관리합니다.
+위험 SQL(DROP/DELETE/TRUNCATE/ALTER) 및 리소스 삭제에 대한 승인 요청을
+생성·조회·처리하고, 승인된 작업을 실행하는 Human-in-the-Loop 워크플로우를 관리합니다.
 
 approval_requests 테이블 스키마:
     id              SERIAL PRIMARY KEY
@@ -367,3 +367,186 @@ def execute_approved(request_id: int) -> dict:
             "message": f"SQL 실행 실패: {error_msg}",
             "rows_affected": 0,
         }
+
+
+# ============================================
+# 리소스 삭제 승인
+# ============================================
+
+def create_delete_request(
+    resource_type: str,
+    resource_name: str,
+    source_file: str,
+    requested_by: str = "system",
+    details: Optional[dict] = None,
+) -> Optional[int]:
+    """
+    리소스 삭제 승인 요청을 생성.
+
+    기존 approval_requests 테이블을 그대로 활용하여
+    request_type='delete_resource'로 삭제 요청을 관리합니다.
+
+    Args:
+        resource_type: "table", "document", "image" 중 하나.
+        resource_name: 삭제 대상명 (테이블명, 문서명, 이미지명).
+        source_file: 원본 파일 경로.
+        requested_by: 요청자 username.
+        details: 추가 정보 (row_count, chunk_count, thumbnail_path 등).
+
+    Returns:
+        생성된 요청 ID (int). 실패 시 None.
+    """
+    title = f"{resource_type} 삭제: {resource_name}"
+    description = f"DELETE {resource_type}:{resource_name} source:{source_file}"
+    metadata = {
+        "resource_type": resource_type,
+        "resource_name": resource_name,
+        "source_file": source_file,
+        "details": details or {},
+    }
+    return create_request(
+        sql=description,
+        title=title,
+        requested_by=requested_by,
+        sql_category="NEEDS_APPROVAL",
+        request_type="delete_resource",
+        metadata=metadata,
+    )
+
+
+def execute_delete_approved(request_id: int) -> dict:
+    """
+    승인된 삭제 요청을 실행.
+
+    metadata의 resource_type에 따라 적절한 정리 함수를 호출합니다:
+    - "table": DROP TABLE + 카탈로그 삭제
+    - "document": ChromaDB 청크 삭제 + 카탈로그 삭제
+    - "image": ChromaDB 임베딩 삭제 + 카탈로그 삭제 + 썸네일 삭제
+
+    원본 파일도 존재하면 함께 삭제합니다.
+
+    Returns:
+        {"success": bool, "message": str}
+    """
+    import os
+    from pathlib import Path
+
+    try:
+        rows = execute_query(
+            "SELECT id, sql_text, status, requested_by, metadata FROM approval_requests WHERE id = %s",
+            (request_id,),
+        )
+        if not rows:
+            return {"success": False, "message": "요청을 찾을 수 없습니다."}
+
+        request = rows[0]
+        if request["status"] != "approved":
+            return {"success": False, "message": f"실행할 수 없는 상태입니다: {request['status']}"}
+
+        metadata = request.get("metadata") or {}
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+
+        resource_type = metadata.get("resource_type", "")
+        resource_name = metadata.get("resource_name", "")
+        source_file = metadata.get("source_file", "")
+
+        # 리소스 유형별 정리
+        if resource_type == "table":
+            _execute_delete_table(resource_name, source_file)
+            result_summary = f"테이블 '{resource_name}' 삭제 완료"
+
+        elif resource_type == "document":
+            _execute_delete_document(resource_name, source_file)
+            result_summary = f"문서 '{resource_name}' 삭제 완료"
+
+        elif resource_type == "image":
+            _execute_delete_image(resource_name, source_file, metadata.get("details", {}))
+            result_summary = f"이미지 '{resource_name}' 삭제 완료"
+
+        else:
+            return {"success": False, "message": f"알 수 없는 리소스 유형: {resource_type}"}
+
+        # 원본 파일 삭제
+        if source_file and os.path.exists(source_file):
+            os.remove(source_file)
+            result_summary += " (원본 파일 포함)"
+
+        # 상태 업데이트
+        execute_command(
+            """
+            UPDATE approval_requests
+            SET status = 'executed', result_summary = %s
+            WHERE id = %s
+            """,
+            (result_summary, request_id),
+        )
+
+        _log_action(
+            action_type="delete_executed",
+            result_summary=result_summary,
+            status="success",
+            user_id=request.get("requested_by", "system"),
+            metadata={"request_id": request_id, "resource_type": resource_type},
+        )
+
+        logger.info(f"Delete request executed: id={request_id}, {result_summary}")
+        return {"success": True, "message": result_summary}
+
+    except Exception as e:
+        error_msg = str(e).strip()
+        logger.error(f"Failed to execute delete request {request_id}: {error_msg}")
+
+        try:
+            execute_command(
+                "UPDATE approval_requests SET result_summary = %s WHERE id = %s",
+                (f"삭제 실패: {error_msg}", request_id),
+            )
+        except Exception:
+            pass
+
+        return {"success": False, "message": f"삭제 실패: {error_msg}"}
+
+
+def _execute_delete_table(table_name: str, source_file: str):
+    """테이블 삭제: DROP TABLE + 카탈로그 삭제."""
+    from catalog.catalog import remove_table
+
+    with get_cursor() as cur:
+        cur.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+
+    remove_table(table_name)
+    logger.info(f"Table deleted via approval: {table_name}")
+
+
+def _execute_delete_document(doc_name: str, source_file: str):
+    """문서 삭제: ChromaDB 청크 삭제 + 카탈로그 삭제."""
+    from catalog.catalog import remove_document
+    from rag.embedder import delete_chunks
+
+    delete_chunks(source=doc_name, collection_name="documents")
+    # catalog_documents 삭제 시 document_chunks도 ON DELETE CASCADE로 자동 삭제
+    remove_document(source_file=source_file)
+    logger.info(f"Document deleted via approval: {doc_name}")
+
+
+def _execute_delete_image(image_name: str, source_file: str, details: dict):
+    """이미지 삭제: ChromaDB 임베딩 삭제 + 카탈로그 삭제 + 썸네일 삭제."""
+    from catalog.catalog import remove_image
+    from rag.image.image_store import delete_image_embedding
+    from pathlib import Path
+
+    delete_image_embedding(image_name)
+    image_info = remove_image(source_file=source_file)
+
+    # 썸네일 삭제
+    thumb_path = (
+        details.get("thumbnail_path")
+        or (image_info.get("thumbnail_path") if image_info else None)
+    )
+    if thumb_path:
+        p = Path(thumb_path)
+        if p.exists():
+            p.unlink()
+
+    logger.info(f"Image deleted via approval: {image_name}")

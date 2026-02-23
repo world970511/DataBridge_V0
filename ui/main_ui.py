@@ -44,6 +44,7 @@ from auth.session import require_login, get_current_user, is_admin, logout
 from ui.chat import render_chat_page
 from ui.approval_ui import render_approval_page
 from ui.admin_ui import render_admin_page
+from ui.data_management_ui import render_data_management_page
 
 logging.basicConfig(
     level=logging.INFO,
@@ -168,7 +169,7 @@ def main():
         st.markdown("---")
 
         # 메뉴 구성 — 역할에 따라 다른 메뉴 표시
-        menu_options = ["💬 Chat"]
+        menu_options = ["💬 Chat", "📁 데이터 관리"]
 
         if is_admin():
             menu_options.append("✅ 승인 관리")
@@ -186,6 +187,8 @@ def main():
     # 선택된 메뉴에 따라 페이지 렌더링
     if selected == "💬 Chat":
         render_chat_page()
+    elif selected == "📁 데이터 관리":
+        render_data_management_page()
     elif selected == "✅ 승인 관리":
         render_approval_page()
     elif selected == "⚙️ 설정":

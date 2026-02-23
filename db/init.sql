@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS catalog_documents (
     chunk_count     INTEGER DEFAULT 0,
     collection_name VARCHAR(255),
     summary_text    TEXT,
+    status          VARCHAR(20) DEFAULT 'active',
+    -- active: 정상 등록, encrypted: 암호화 파일, failed: 처리 실패
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
@@ -61,6 +63,7 @@ CREATE TABLE IF NOT EXISTS catalog_documents (
 -- 기존 배포 마이그레이션 (catalog_documents):
 -- ALTER TABLE catalog_documents ADD COLUMN IF NOT EXISTS summary_text TEXT;
 -- ALTER TABLE catalog_documents ADD CONSTRAINT uq_catalog_documents_source_file UNIQUE (source_file);
+-- ALTER TABLE catalog_documents ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';
 
 -- 기존 배포 마이그레이션 (Rich Catalog):
 -- ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS description TEXT;
@@ -71,6 +74,75 @@ CREATE TABLE IF NOT EXISTS catalog_documents (
 -- ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS numeric_ratio FLOAT;
 -- ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS avg_text_length FLOAT;
 -- CREATE INDEX IF NOT EXISTS idx_catalog_tables_tags ON catalog_tables USING GIN (tags);
+
+-- ============================================
+-- 1a. 문서 청크 캐시 (원문 텍스트 청크를 PostgreSQL에 캐시)
+-- ============================================
+-- ChromaDB에는 요약만 임베딩하고, 원문 청크는 여기에 저장하여
+-- 질의 시 파일 재파싱 없이 관련 청크를 즉시 로드합니다.
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id              SERIAL PRIMARY KEY,
+    document_id     INTEGER NOT NULL REFERENCES catalog_documents(id) ON DELETE CASCADE,
+    chunk_index     INTEGER NOT NULL,           -- 문서 내 0-based 순서
+    chunk_text      TEXT NOT NULL,              -- 원문 청크 텍스트
+    char_offset     INTEGER DEFAULT 0,          -- 원본 텍스트 내 시작 위치
+    char_length     INTEGER DEFAULT 0,          -- 청크 문자 수
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_doc_chunks_document_id ON document_chunks(document_id);
+CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc_idx ON document_chunks(document_id, chunk_index);
+
+-- 기존 배포 마이그레이션 (document_chunks):
+-- CREATE TABLE IF NOT EXISTS document_chunks ( ... );  -- 위 DDL 참조
+-- CREATE INDEX IF NOT EXISTS idx_doc_chunks_document_id ON document_chunks(document_id);
+-- CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc_idx ON document_chunks(document_id, chunk_index);
+
+-- ============================================
+-- 1b. 이미지 카탈로그 (EXIF + DINOv2 임베딩 메타데이터)
+-- ============================================
+CREATE TABLE IF NOT EXISTS catalog_images (
+    id              SERIAL PRIMARY KEY,
+    image_name      VARCHAR(500) NOT NULL,
+    source_file     TEXT NOT NULL UNIQUE,
+    file_type       VARCHAR(50),
+    file_size_bytes BIGINT DEFAULT 0,
+    -- 이미지 크기
+    width           INTEGER,
+    height          INTEGER,
+    -- EXIF 구조화 데이터
+    camera_make     VARCHAR(200),
+    camera_model    VARCHAR(200),
+    lens_info       VARCHAR(300),
+    focal_length    FLOAT,
+    aperture        FLOAT,                  -- f-number
+    shutter_speed   VARCHAR(50),            -- 예: "1/250"
+    iso             INTEGER,
+    date_taken      TIMESTAMPTZ,            -- EXIF DateTimeOriginal
+    gps_latitude    DOUBLE PRECISION,
+    gps_longitude   DOUBLE PRECISION,
+    gps_altitude    FLOAT,
+    orientation     INTEGER,                -- EXIF orientation 태그
+    -- DINOv2 임베딩 정보
+    embedding_dim   INTEGER,                -- 384 (ViT-S/14) 등
+    collection_name VARCHAR(255) DEFAULT 'images',
+    -- 썸네일
+    thumbnail_path  TEXT,
+    -- 중복/그룹 정보
+    duplicate_group_id  INTEGER,            -- NULL = 중복 그룹 없음
+    is_duplicate    BOOLEAN DEFAULT FALSE,
+    -- EXIF 원본 (JSON 백업)
+    exif_json       JSONB,
+    -- 타임스탬프
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_catalog_images_name ON catalog_images(image_name);
+CREATE INDEX IF NOT EXISTS idx_catalog_images_date ON catalog_images(date_taken);
+CREATE INDEX IF NOT EXISTS idx_catalog_images_dup_group ON catalog_images(duplicate_group_id);
+CREATE INDEX IF NOT EXISTS idx_catalog_images_gps ON catalog_images(gps_latitude, gps_longitude)
+    WHERE gps_latitude IS NOT NULL;
 
 -- ============================================
 -- 2. 감사 로그 (모든 질의/승인/실행 이력)

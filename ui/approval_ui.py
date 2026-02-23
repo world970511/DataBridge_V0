@@ -4,17 +4,20 @@ DataBridge 승인 관리 페이지.
 관리자(admin):
     - 대기 중(pending) 승인 요청 목록을 조회
     - 각 요청에 대해 [승인] / [승인 및 실행] / [거부] 버튼으로 처리
+    - 리소스 삭제 요청도 동일한 워크플로우로 처리
 
 일반 사용자:
     - 본인이 요청한 승인 요청의 상태를 조회
 
 의존 모듈:
     - approval.approval_manager: list_pending(), list_user_requests(),
-      approve_request(), deny_request(), execute_approved()
+      approve_request(), deny_request(), execute_approved(), execute_delete_approved()
     - auth.session: get_current_user(), is_admin()
 """
 
+import json
 import logging
+from pathlib import Path
 
 import streamlit as st
 
@@ -24,6 +27,7 @@ from approval.approval_manager import (
     approve_request,
     deny_request,
     execute_approved,
+    execute_delete_approved,
 )
 from auth.session import get_current_user, is_admin
 
@@ -67,60 +71,145 @@ def _render_admin_approval_view():
 
     for req in pending:
         with st.container(border=True):
-            # 요청 헤더
-            col1, col2, col3 = st.columns([3, 1, 1])
-            with col1:
-                st.markdown(f"**#{req['id']}** — {req.get('title', '제목 없음')}")
-            with col2:
-                st.caption(f"요청자: {req.get('requested_by', 'unknown')}")
-            with col3:
-                st.caption(f"분류: {req.get('sql_category', 'N/A')}")
+            if req.get("request_type") == "delete_resource":
+                _render_delete_request(req)
+            else:
+                _render_sql_request(req)
 
-            # SQL 표시
-            st.code(req.get("sql_text", ""), language="sql")
 
-            # 생성 시각
-            created_at = req.get("created_at")
-            if created_at:
-                st.caption(f"요청 시각: {created_at}")
+def _render_sql_request(req: dict):
+    """SQL 승인 요청을 관리자에게 표시."""
+    # 요청 헤더
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1:
+        st.markdown(f"**#{req['id']}** — {req.get('title', '제목 없음')}")
+    with col2:
+        st.caption(f"요청자: {req.get('requested_by', 'unknown')}")
+    with col3:
+        st.caption(f"분류: {req.get('sql_category', 'N/A')}")
 
-            # 액션 버튼
-            btn_col1, btn_col2, btn_col3 = st.columns(3)
+    # SQL 표시
+    st.code(req.get("sql_text", ""), language="sql")
 
-            with btn_col1:
-                if st.button(
-                    "✅ 승인 및 실행",
-                    key=f"approve_exec_{req['id']}",
-                    use_container_width=True,
-                ):
-                    _approve_and_execute(req["id"])
+    # 생성 시각
+    created_at = req.get("created_at")
+    if created_at:
+        st.caption(f"요청 시각: {created_at}")
 
-            with btn_col2:
-                if st.button(
-                    "👍 승인만",
-                    key=f"approve_{req['id']}",
-                    use_container_width=True,
-                ):
-                    user = get_current_user()
-                    if approve_request(req["id"], reviewed_by=user["username"]):
-                        st.success(f"요청 #{req['id']}이 승인되었습니다.")
-                        st.rerun()
-                    else:
-                        st.error("승인 처리에 실패했습니다.")
+    # 액션 버튼
+    btn_col1, btn_col2, btn_col3 = st.columns(3)
 
-            with btn_col3:
-                if st.button(
-                    "❌ 거부",
-                    key=f"deny_{req['id']}",
-                    type="secondary",
-                    use_container_width=True,
-                ):
-                    user = get_current_user()
-                    if deny_request(req["id"], reviewed_by=user["username"]):
-                        st.warning(f"요청 #{req['id']}이 거부되었습니다.")
-                        st.rerun()
-                    else:
-                        st.error("거부 처리에 실패했습니다.")
+    with btn_col1:
+        if st.button(
+            "✅ 승인 및 실행",
+            key=f"approve_exec_{req['id']}",
+            use_container_width=True,
+        ):
+            _approve_and_execute(req["id"])
+
+    with btn_col2:
+        if st.button(
+            "👍 승인만",
+            key=f"approve_{req['id']}",
+            use_container_width=True,
+        ):
+            user = get_current_user()
+            if approve_request(req["id"], reviewed_by=user["username"]):
+                st.success(f"요청 #{req['id']}이 승인되었습니다.")
+                st.rerun()
+            else:
+                st.error("승인 처리에 실패했습니다.")
+
+    with btn_col3:
+        if st.button(
+            "❌ 거부",
+            key=f"deny_{req['id']}",
+            type="secondary",
+            use_container_width=True,
+        ):
+            user = get_current_user()
+            if deny_request(req["id"], reviewed_by=user["username"]):
+                st.warning(f"요청 #{req['id']}이 거부되었습니다.")
+                st.rerun()
+            else:
+                st.error("거부 처리에 실패했습니다.")
+
+
+def _render_delete_request(req: dict):
+    """리소스 삭제 요청을 관리자에게 표시."""
+    raw_meta = req.get("metadata") or {}
+    if isinstance(raw_meta, str):
+        raw_meta = json.loads(raw_meta)
+
+    resource_type = raw_meta.get("resource_type", "unknown")
+    resource_name = raw_meta.get("resource_name", "")
+    source_file = raw_meta.get("source_file", "")
+    details = raw_meta.get("details", {})
+
+    type_icons = {"table": "📊", "document": "📄", "image": "🖼️"}
+    icon = type_icons.get(resource_type, "📁")
+
+    # 헤더
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1:
+        st.markdown(f"**#{req['id']}** {icon} {req.get('title', '제목 없음')}")
+    with col2:
+        st.caption(f"요청자: {req.get('requested_by', 'unknown')}")
+    with col3:
+        st.caption(f"유형: {resource_type}")
+
+    # 상세 정보
+    st.markdown(f"- **대상**: `{resource_name}`")
+    st.markdown(f"- **원본 파일**: `{source_file}`")
+    if resource_type == "table" and details.get("row_count"):
+        st.markdown(f"- **행 수**: {details['row_count']:,}")
+    if resource_type == "document" and details.get("chunk_count"):
+        st.markdown(f"- **청크 수**: {details['chunk_count']}")
+    if resource_type == "image" and details.get("thumbnail_path"):
+        thumb = details["thumbnail_path"]
+        if Path(thumb).exists():
+            st.image(thumb, width=128, caption=resource_name)
+
+    created_at = req.get("created_at")
+    if created_at:
+        st.caption(f"요청 시각: {created_at}")
+
+    st.warning("이 작업은 되돌릴 수 없습니다. DB 레코드, 임베딩, 원본 파일이 모두 삭제됩니다.")
+
+    # 액션 버튼
+    btn_col1, btn_col2, btn_col3 = st.columns(3)
+    with btn_col1:
+        if st.button(
+            "✅ 승인 및 삭제",
+            key=f"del_exec_{req['id']}",
+            use_container_width=True,
+        ):
+            _approve_and_execute_delete(req["id"])
+    with btn_col2:
+        if st.button(
+            "👍 승인만",
+            key=f"del_approve_{req['id']}",
+            use_container_width=True,
+        ):
+            user = get_current_user()
+            if approve_request(req["id"], reviewed_by=user["username"]):
+                st.success(f"요청 #{req['id']}이 승인되었습니다.")
+                st.rerun()
+            else:
+                st.error("승인 처리에 실패했습니다.")
+    with btn_col3:
+        if st.button(
+            "❌ 거부",
+            key=f"del_deny_{req['id']}",
+            type="secondary",
+            use_container_width=True,
+        ):
+            user = get_current_user()
+            if deny_request(req["id"], reviewed_by=user["username"]):
+                st.warning(f"요청 #{req['id']}이 거부되었습니다.")
+                st.rerun()
+            else:
+                st.error("거부 처리에 실패했습니다.")
 
 
 def _approve_and_execute(request_id: int):
@@ -138,6 +227,22 @@ def _approve_and_execute(request_id: int):
             st.success(f"✅ 요청 #{request_id} 실행 완료: {result['message']}")
         else:
             st.error(f"실행 실패: {result['message']}")
+        st.rerun()
+    else:
+        st.error("승인 처리에 실패했습니다.")
+
+
+def _approve_and_execute_delete(request_id: int):
+    """삭제 요청을 승인한 후 즉시 실행."""
+    user = get_current_user()
+    username = user["username"] if user else "admin"
+
+    if approve_request(request_id, reviewed_by=username):
+        result = execute_delete_approved(request_id)
+        if result["success"]:
+            st.success(f"✅ 삭제 완료: {result['message']}")
+        else:
+            st.error(f"삭제 실패: {result['message']}")
         st.rerun()
     else:
         st.error("승인 처리에 실패했습니다.")

@@ -1,21 +1,27 @@
 """
 문서 요약 생성 모듈 -- 업로드 시 Tier 1 임베딩용 경량 요약을 생성.
 
-LLM을 사용하여 문서 텍스트의 간결한 요약을 생성하되,
-LLM 호출이 실패하면 폴백으로 첫 1000자 + 추출된 섹션 제목을 사용합니다.
+TF-IDF 기반 추출적 요약을 기본으로 사용하여 LLM 호출 없이
+문서의 핵심 문장을 선별합니다 (문서당 수 밀리초).
 생성된 요약은 ChromaDB에 임베딩되어 "어떤 파일에 관련 내용이 있는가?"를
 판별하는 시맨틱 검색에 활용됩니다.
 
+LLM 요약은 generate_summary_with_llm()으로 명시 호출 시에만 사용됩니다.
+
 의존 모듈:
-    - agent._llm: generate() — Ollama LLM 호출
+    - sklearn.feature_extraction.text: TfidfVectorizer — TF-IDF 벡터화
+    - agent._llm: generate() — Ollama LLM 호출 (선택적)
 """
 
 import logging
 import re
 
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+
 logger = logging.getLogger(__name__)
 
-# LLM 요약 생성용 시스템 프롬프트
+# LLM 요약 생성용 시스템 프롬프트 (명시적 LLM 요약 호출 시 사용)
 _SUMMARY_SYSTEM_PROMPT = """You are a document summarization expert.
 Summarize the given document text in 300 characters or less.
 
@@ -36,8 +42,8 @@ def generate_summary(text: str, source: str = "", max_chars: int = 1000) -> str:
     """
     문서 텍스트로부터 검색용 요약을 생성.
 
-    1차: LLM에 요약 요청 (300자 이내 요약 + 주요 키워드).
-    폴백: LLM 실패 시 첫 500자 + 섹션 제목 추출 결과를 결합.
+    TF-IDF 기반 추출적 요약을 기본으로 사용합니다 (LLM 호출 없음).
+    추출적 요약이 실패하면 폴백(첫 500자 + 섹션 제목)을 사용합니다.
 
     Args:
         text: 전체 문서 텍스트.
@@ -50,25 +56,118 @@ def generate_summary(text: str, source: str = "", max_chars: int = 1000) -> str:
     if not text or not text.strip():
         return ""
 
-    summary = _summarize_with_llm(text, max_chars)
+    summary = generate_extractive_summary(text, source, max_chars)
 
     if not summary:
-        logger.info(f"LLM summary failed for '{source}', using fallback")
+        logger.info(f"Extractive summary failed for '{source}', using fallback")
         summary = _summarize_fallback(text, max_chars)
 
     logger.info(f"Summary generated for '{source}': {len(summary)} chars")
     return summary
 
 
-def _summarize_with_llm(text: str, max_chars: int) -> str:
+def generate_extractive_summary(
+    text: str,
+    source: str = "",
+    max_chars: int = 1000,
+    max_sentences: int = 15,
+) -> str:
     """
-    Ollama LLM을 호출하여 문서 요약을 생성.
+    TF-IDF 기반 추출적 요약 생성 (LLM 불필요, 수 밀리초).
+
+    문서 텍스트를 문장으로 분리한 뒤 TF-IDF 가중치 합이 가장 높은
+    문장들을 원본 순서대로 선택하여 max_chars 이내의 요약을 구성합니다.
+    섹션 제목도 추출하여 요약 뒤에 추가합니다.
+
+    Args:
+        text: 전체 문서 텍스트.
+        source: 문서 파일명 (로깅용).
+        max_chars: 요약 최대 길이 (기본 1000자).
+        max_sentences: 추출할 최대 문장 수 (기본 15).
+
+    Returns:
+        추출적 요약 텍스트. 빈 텍스트 입력 시 빈 문자열.
+    """
+    if not text or not text.strip():
+        return ""
+
+    sentences = _split_into_sentences(text)
+    if not sentences:
+        return text[:max_chars]
+
+    # 너무 짧거나 긴 문장 필터링
+    valid = [(i, s) for i, s in enumerate(sentences) if 10 <= len(s.strip()) <= 500]
+    if not valid:
+        return text[:max_chars]
+
+    indices, sent_texts = zip(*valid)
+
+    # TF-IDF 점수 계산
+    try:
+        vectorizer = TfidfVectorizer(max_features=5000)
+        tfidf_matrix = vectorizer.fit_transform(sent_texts)
+        scores = np.array(tfidf_matrix.sum(axis=1)).flatten()
+    except ValueError:
+        logger.debug(f"TF-IDF failed for '{source}', using fallback")
+        return ""
+
+    # 상위 N개 문장 선택
+    top_n = min(max_sentences, len(scores))
+    top_score_indices = np.argsort(scores)[-top_n:]
+
+    # 원본 문서 순서대로 재정렬 (서사 흐름 유지)
+    selected = sorted(top_score_indices, key=lambda x: indices[x])
+    summary_sentences = [sent_texts[i] for i in selected]
+
+    # max_chars 이내로 조합
+    summary = ""
+    for sent in summary_sentences:
+        candidate = summary + ("\n" if summary else "") + sent
+        if len(candidate) > max_chars:
+            break
+        summary = candidate
+
+    # 남은 공간에 섹션 제목 추가
+    headings = _extract_headings(text)
+    if headings:
+        headings_text = "\n[주요 섹션]\n" + "\n".join(headings[:10])
+        if len(summary) + len(headings_text) <= max_chars:
+            summary += headings_text
+
+    if not summary:
+        return text[:max_chars]
+
+    logger.debug(f"Extractive summary for '{source}': {len(summary)} chars")
+    return summary
+
+
+def _split_into_sentences(text: str) -> list[str]:
+    """
+    텍스트를 문장 단위로 분리 (한/영/일 지원).
+
+    마침표·느낌표·물음표와 한국어 종결 어미(다/요/음/니까) 뒤
+    공백·줄바꿈을 기준으로 분할합니다.
+    """
+    raw = re.split(r"(?<=[.!?。])\s+|\n+", text)
+    return [s.strip() for s in raw if s.strip()]
+
+
+# ============================================
+# LLM 기반 요약 (선택적 사용)
+# ============================================
+
+def generate_summary_with_llm(text: str, source: str = "", max_chars: int = 1000) -> str:
+    """
+    Ollama LLM을 호출하여 문서 요약을 생성 (명시적 호출 시 사용).
 
     텍스트가 _LLM_INPUT_MAX_CHARS를 초과하면 앞부분만 전달합니다.
 
     Returns: LLM 요약 문자열, 실패 시 빈 문자열.
     """
     from agent._llm import generate
+
+    if not text or not text.strip():
+        return ""
 
     truncated = text[:_LLM_INPUT_MAX_CHARS]
     prompt = f"Summarize the following document:\n\n{truncated}"
@@ -77,19 +176,24 @@ def _summarize_with_llm(text: str, max_chars: int) -> str:
         prompt=prompt,
         system=_SUMMARY_SYSTEM_PROMPT,
         temperature=0.1,
-        timeout=30,
     )
 
     if result:
-        return result[:max_chars]
+        summary = result[:max_chars]
+        logger.info(f"LLM summary for '{source}': {len(summary)} chars")
+        return summary
     return ""
 
 
+# ============================================
+# 폴백 / 유틸리티
+# ============================================
+
 def _summarize_fallback(text: str, max_chars: int) -> str:
     """
-    LLM 없이 규칙 기반으로 요약을 생성 (폴백).
+    규칙 기반 폴백 요약: 첫 500자 + 섹션 제목.
 
-    첫 1000자 + 문서에서 추출한 제목/헤더 라인을 합쳐서 max_chars 이내로 반환합니다.
+    추출적 요약과 LLM 요약 모두 실패했을 때 사용합니다.
     """
     head = text[:_FALLBACK_HEAD_CHARS].strip()
 

@@ -34,6 +34,8 @@ def cleanup_file(file_path: str, action: str):
         _cleanup_structured_data(file_path)
     elif action == "register_for_search":
         _cleanup_document(file_path)
+    elif action == "register_image":
+        _cleanup_image(file_path)
     else:
         logger.debug(f"No cleanup needed for action: {action}")
 
@@ -110,6 +112,7 @@ def _cleanup_document(file_path: str):
         deleted_count = delete_chunks(source=path.name, collection_name="documents")
 
         # 카탈로그에서 문서 메타데이터 삭제
+        # (document_chunks도 ON DELETE CASCADE로 자동 삭제됨)
         doc_info = remove_document(source_file=str(file_path))
 
         if doc_info or deleted_count > 0:
@@ -126,4 +129,47 @@ def _cleanup_document(file_path: str):
 
     except Exception as e:
         logger.exception(f"Failed to clean up document: {path.name}")
+        log_file_process(file_path, file_type, "delete", None, "failed", str(e))
+
+
+def _cleanup_image(file_path: str):
+    """
+    이미지 삭제 시 ChromaDB 임베딩, 카탈로그, 썸네일을 정리.
+
+    watchdog에 의한 파일시스템 직접 삭제 시 호출됩니다 (승인 없이 즉시 실행).
+    """
+    from catalog.catalog import remove_image
+    from rag.image.image_store import delete_image_embedding
+    from watcher.classifier import get_file_type
+
+    file_type = get_file_type(file_path)
+    path = Path(file_path)
+
+    try:
+        # ChromaDB에서 임베딩 삭제
+        deleted_count = delete_image_embedding(path.name)
+
+        # 카탈로그에서 이미지 메타데이터 삭제 (썸네일 경로 포함)
+        image_info = remove_image(source_file=str(file_path))
+
+        # 썸네일 파일 삭제
+        if image_info and image_info.get("thumbnail_path"):
+            thumb_path = Path(image_info["thumbnail_path"])
+            if thumb_path.exists():
+                thumb_path.unlink()
+
+        if image_info or deleted_count > 0:
+            logger.info(
+                f"Cleaned up image '{path.name}': "
+                f"{deleted_count} embedding(s) removed from ChromaDB"
+            )
+            log_file_process(
+                file_path, file_type, "delete", None, "success",
+                f"Removed {deleted_count} embedding(s)",
+            )
+        else:
+            logger.info(f"No image data found for deleted file: {path.name}")
+
+    except Exception as e:
+        logger.exception(f"Failed to clean up image: {path.name}")
         log_file_process(file_path, file_type, "delete", None, "failed", str(e))

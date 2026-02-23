@@ -41,6 +41,7 @@ LLM 텍스트 생성을 수행합니다.
 """
 
 import logging
+import os
 from typing import Literal
 
 import requests
@@ -162,12 +163,12 @@ def _get_adaptive_timeout(base_url: str, env_timeout: int) -> int:
     GPU/CPU 상태에 따라 적절한 타임아웃을 반환.
 
     GPU 사용 시 env_timeout(기본 120s) 유지,
-    CPU 모드 시 max(env_timeout, 300s)로 상향.
+    CPU 모드 시 max(env_timeout, 600s)로 상향.
     """
     try:
         status = get_cached_compute_status(base_url)
-        recommended = status.get("recommended_timeout", 300)
-        # CPU 모드면 최소 300초 보장, GPU면 env 설정 존중
+        recommended = status.get("recommended_timeout", 600)
+        # CPU 모드면 최소 600초 보장, GPU면 env 설정 존중
         if status.get("compute_device") == "cpu":
             return max(env_timeout, recommended)
         return env_timeout
@@ -185,13 +186,24 @@ def _generate_ollama(
     """Ollama REST API를 호출하여 텍스트 생성."""
     url = f"{config.base_url}/api/generate"
 
+    options = {
+        "temperature": temperature,
+    }
+
+    # CPU 모드일 때 성능 최적화 옵션 추가
+    try:
+        status = get_cached_compute_status(config.base_url)
+        if status.get("compute_device") == "cpu":
+            options["num_ctx"] = 1024   # 컨텍스트 길이 축소 (기본 2048 → 1024)
+            options["num_thread"] = os.cpu_count() or 4  # CPU 코어 전부 활용
+    except Exception:
+        pass
+
     payload = {
         "model": config.model,
         "prompt": prompt,
         "stream": False,
-        "options": {
-            "temperature": temperature,
-        },
+        "options": options,
     }
 
     if system:
@@ -530,7 +542,7 @@ def check_ollama_compute_status(base_url: str = "") -> dict:
         "vram_used_mb": None,
         "loaded_models": [],
         "installed_models": [],
-        "recommended_timeout": 300,
+        "recommended_timeout": 600,
         "message": "",
     }
 
@@ -583,7 +595,7 @@ def check_ollama_compute_status(base_url: str = "") -> dict:
                     result["message"] = f"GPU 가속 사용 중 (VRAM {total_vram}MB 사용)"
                 else:
                     result["compute_device"] = "cpu"
-                    result["recommended_timeout"] = 300
+                    result["recommended_timeout"] = 600
                     result["message"] = "CPU 모드로 실행 중 (GPU 미사용, 응답 느림)"
             else:
                 # 로드된 모델이 없으면 판별 불가, CPU로 간주

@@ -47,8 +47,8 @@ class ChromaConfig:
 @dataclass
 class OllamaConfig:
     host: str = "http://localhost:11434"
-    model: str = "gemma2:2b"
-    timeout: int = 120  # LLM 응답 타임아웃 (초). CPU 환경에서는 60초 이상 걸릴 수 있음
+    model: str = ""  # .env의 LLM_MODEL에서 로드 (load_settings 참조)
+    timeout: int = 300  # LLM 응답 타임아웃 (초). CPU 환경에서는 자동으로 최소 600초 적용
 
 
 @dataclass
@@ -62,7 +62,7 @@ class LLMProviderConfig:
     base_url: API 엔드포인트 URL (Ollama용 또는 커스텀 엔드포인트, HF는 미사용)
     """
     provider: str = "ollama"
-    model: str = "gemma2:2b"
+    model: str = ""  # .env의 LLM_MODEL 또는 ORCHESTRATOR/AGENT_LLM_MODEL에서 로드
     api_key: str = ""
     base_url: str = "http://localhost:11434"
 
@@ -121,6 +121,30 @@ class DocumentConfig:
 
 
 @dataclass
+class ImageConfig:
+    """
+    이미지 처리 관련 설정.
+
+    dino_model: DINOv2 모델 변형 ("dinov2_vits14", "dinov2_vitb14" 등).
+    dino_device: torch 디바이스 ("cpu", "cuda"). 빈 문자열이면 자동 감지.
+    similarity_threshold: 중복 판별 코사인 유사도 임계값 (0.0~1.0).
+    near_duplicate_threshold: 유사 그룹핑 임계값.
+    thumbnail_size: 썸네일 최대 크기(px).
+    thumbnail_dir: 썸네일 저장 디렉토리.
+    max_image_size_mb: 처리할 최대 이미지 파일 크기(MB).
+    collection_name: ChromaDB 컬렉션명.
+    """
+    dino_model: str = "dinov2_vits14"
+    dino_device: str = ""
+    similarity_threshold: float = 0.98
+    near_duplicate_threshold: float = 0.90
+    thumbnail_size: int = 256
+    thumbnail_dir: str = "/app/thumbnails"
+    max_image_size_mb: float = 50.0
+    collection_name: str = "images"
+
+
+@dataclass
 class AuthConfig:
     """
     인증 관련 설정.
@@ -143,6 +167,7 @@ class Settings:
     agent: AgentConfig = field(default_factory=AgentConfig)
     watcher: WatcherConfig = field(default_factory=WatcherConfig)
     document: DocumentConfig = field(default_factory=DocumentConfig)
+    image: ImageConfig = field(default_factory=ImageConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
     app_port: int = 8501
     job_log_dir: str = "./logs/jobs"
@@ -173,7 +198,7 @@ def load_settings() -> Settings:
     ollama = OllamaConfig(
         host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         model=os.getenv("LLM_MODEL", "gemma2:2b"),
-        timeout=int(os.getenv("LLM_TIMEOUT", "120")),
+        timeout=int(os.getenv("LLM_TIMEOUT", "300")),
     )
 
     agent = AgentConfig(
@@ -195,6 +220,17 @@ def load_settings() -> Settings:
 
     document = DocumentConfig(
         max_embed_size_mb=float(os.getenv("MAX_EMBED_SIZE_MB", "10.0")),
+    )
+
+    image = ImageConfig(
+        dino_model=os.getenv("DINO_MODEL", "dinov2_vits14"),
+        dino_device=os.getenv("DINO_DEVICE", ""),
+        similarity_threshold=float(os.getenv("IMAGE_SIMILARITY_THRESHOLD", "0.98")),
+        near_duplicate_threshold=float(os.getenv("IMAGE_NEAR_DUPLICATE_THRESHOLD", "0.90")),
+        thumbnail_size=int(os.getenv("IMAGE_THUMBNAIL_SIZE", "256")),
+        thumbnail_dir=os.getenv("IMAGE_THUMBNAIL_DIR", "/app/thumbnails"),
+        max_image_size_mb=float(os.getenv("IMAGE_MAX_SIZE_MB", "50.0")),
+        collection_name=os.getenv("IMAGE_COLLECTION_NAME", "images"),
     )
 
     # LLM 다중 모델 설정
@@ -228,6 +264,7 @@ def load_settings() -> Settings:
         agent=agent,
         watcher=watcher,
         document=document,
+        image=image,
         auth=auth,
         app_port=int(os.getenv("APP_PORT", "8501")),
         job_log_dir=os.getenv("JOB_LOG_DIR", "./logs/jobs"),

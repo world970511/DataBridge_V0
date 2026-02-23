@@ -16,9 +16,17 @@ xlrd>=2.0,<3.0          # Excel 97-2003 (.xls) 포맷 지원
 # === Document Parsing ===
 pypdf>=4.0,<5.0
 python-docx>=1.1,<2.0
+python-pptx>=1.0,<2.0
+olefile>=0.47,<1.0        # HWP/DOC/PPT (OLE2 Compound File) 파싱
 
 # === RAG / Embedding ===
 # ChromaDB 내장 임베딩 사용 (sentence-transformers 자동 설치됨)
+
+# === Image Processing (DINOv2 + EXIF) ===
+# torch/torchvision CPU 전용 — Dockerfile에서 --index-url로 설치
+# (requirements.txt에 직접 넣으면 CUDA 버전이 설치되므로 제외)
+Pillow>=10.0,<11.0
+scikit-learn>=1.3,<2.0
 
 # === Testing ===
 pytest>=8.0,<9.0

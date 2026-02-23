@@ -191,5 +191,109 @@ def _format_columns_rich(columns_json, column_descriptions=None) -> str:
         return "(No column info)"
 
 
+def get_table_column_info(table_name: str) -> str | None:
+    """
+    특정 테이블의 컬럼 정보를 상세 포맷으로 반환.
+
+    카탈로그에서 해당 테이블의 컬럼명, 타입, 설명(Rich Catalog)을 조회하여
+    사용자가 읽기 쉬운 텍스트로 포맷팅합니다.
+    "컬럼이 뭐야?", "스키마 알려줘" 같은 메타데이터 질의에 LLM 없이 즉시 응답하는 데 사용됩니다.
+
+    Args:
+        table_name: 조회할 테이블명.
+
+    Returns:
+        컬럼 정보 포맷팅 텍스트. 테이블이 없으면 None.
+    """
+    try:
+        info = get_table_info(table_name)
+        if not info:
+            return None
+
+        columns_json = info.get("columns_json")
+        column_descs = info.get("column_descriptions")
+        description = info.get("description")
+        tags = info.get("tags")
+        row_count = info.get("row_count", 0)
+
+        lines = [f"📊 **{table_name}** ({row_count:,}행)"]
+
+        if description:
+            lines.append(f"설명: {description}")
+        if tags:
+            tag_list = tags if isinstance(tags, list) else []
+            if tag_list:
+                lines.append(f"태그: {', '.join(tag_list)}")
+
+        lines.append(f"\n컬럼 목록 ({_count_columns(columns_json)}개):")
+
+        # 컬럼 상세 정보
+        col_descs = _parse_column_descriptions(column_descs)
+        col_lines = _format_column_detail(columns_json, col_descs)
+        lines.extend(col_lines)
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.error(f"Failed to get column info for {table_name}: {e}")
+        return None
+
+
+def _count_columns(columns_json) -> int:
+    """컬럼 수를 반환."""
+    if not columns_json:
+        return 0
+    try:
+        if isinstance(columns_json, str):
+            import json as _json
+            columns_json = _json.loads(columns_json)
+        return len(columns_json) if isinstance(columns_json, list) else 0
+    except Exception:
+        return 0
+
+
+def _parse_column_descriptions(column_descriptions) -> dict:
+    """column_descriptions를 dict로 파싱."""
+    if not column_descriptions:
+        return {}
+    if isinstance(column_descriptions, dict):
+        return column_descriptions
+    if isinstance(column_descriptions, str):
+        try:
+            return json.loads(column_descriptions)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
+
+def _format_column_detail(columns_json, col_descs: dict) -> list[str]:
+    """컬럼 정보를 상세 리스트로 포맷팅."""
+    if not columns_json:
+        return ["  (컬럼 정보 없음)"]
+
+    try:
+        if isinstance(columns_json, str):
+            columns_json = json.loads(columns_json)
+
+        if not isinstance(columns_json, list):
+            return ["  (컬럼 정보 없음)"]
+
+        lines = []
+        for i, col in enumerate(columns_json, 1):
+            col_name = col.get("name", col.get("column", "?"))
+            col_type = col.get("type", col.get("dtype", "?"))
+
+            desc = col_descs.get(col_name, "")
+            if desc:
+                lines.append(f"  {i}. {col_name} ({col_type}) — {desc}")
+            else:
+                lines.append(f"  {i}. {col_name} ({col_type})")
+
+        return lines if lines else ["  (컬럼 정보 없음)"]
+
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return ["  (컬럼 정보 없음)"]
+
+
 # 하위 호환: 기존 _format_columns 이름으로도 접근 가능
 _format_columns = _format_columns_rich

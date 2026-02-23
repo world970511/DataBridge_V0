@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_RULES = [
     {"patterns": ["~$*", "*.tmp", "Thumbs.db", ".DS_Store", "*.swp", "*.lock"], "action": "ignore"},
     {"patterns": ["*.xlsx", "*.xls", "*.csv", "*.tsv"], "action": "load_to_db"},
-    {"patterns": ["*.pdf", "*.hwp", "*.hwpx", "*.docx", "*.txt"], "action": "register_for_search"},
+    {"patterns": ["*.pdf", "*.hwp", "*.hwpx", "*.doc", "*.docx", "*.ppt", "*.pptx", "*.txt"], "action": "register_for_search"},
+    {"patterns": ["*.jpg", "*.jpeg", "*.png", "*.tiff", "*.tif", "*.bmp", "*.webp", "*.heic"], "action": "register_image"},
 ]
 
 
@@ -77,7 +78,8 @@ def get_file_type(file_path: str) -> str:
     파일 확장자를 기반으로 내부 파일 유형 문자열을 반환.
 
     지원되는 매핑: .csv/.tsv→'csv', .xlsx/.xls→'excel', .pdf→'pdf',
-    .hwp/.hwpx→'hwp', .docx→'docx', .txt→'text', .json→'json'.
+    .hwp/.hwpx→'hwp', .doc→'doc', .docx→'docx', .ppt→'ppt', .pptx→'pptx',
+    .txt→'text', .json→'json'.
     매핑에 없는 확장자는 'unknown'을 반환합니다.
     Returns: 파일 유형을 나타내는 문자열 (예: 'csv', 'excel', 'pdf').
     """
@@ -90,9 +92,20 @@ def get_file_type(file_path: str) -> str:
         ".pdf": "pdf",
         ".hwp": "hwp",
         ".hwpx": "hwp",
+        ".doc": "doc",
         ".docx": "docx",
+        ".ppt": "ppt",
+        ".pptx": "pptx",
         ".txt": "text",
         ".json": "json",
+        ".jpg": "image",
+        ".jpeg": "image",
+        ".png": "image",
+        ".tiff": "image",
+        ".tif": "image",
+        ".bmp": "image",
+        ".webp": "image",
+        ".heic": "image",
     }
     return type_map.get(suffix, "unknown")
 
@@ -118,6 +131,8 @@ def classify_file(file_path: str):
         _route_to_db_loader(file_path, file_type)
     elif action == "register_for_search":
         _route_to_doc_loader(file_path, file_type)
+    elif action == "register_image":
+        _route_to_image_loader(file_path, file_type)
     else:
         logger.warning(f"Unknown action: {action} for {file_path}")
 
@@ -316,6 +331,12 @@ def _read_full_dataframe(file_path: str, file_type: str) -> Optional[pd.DataFram
             return None
     except Exception:
         return None
+
+
+def _route_to_image_loader(file_path: str, file_type: str):
+    """이미지 파일을 image_loader.load_image()로 라우팅."""
+    from watcher.loader.image_loader import load_image
+    load_image(file_path, file_type)
 
 
 def _route_to_doc_loader(file_path: str, file_type: str):
