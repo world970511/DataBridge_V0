@@ -11,6 +11,8 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
+from rag.parser import EncryptedFileError
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,6 +31,11 @@ def parse_pdf(file_path: str) -> str:
 
     try:
         reader = PdfReader(file_path)
+
+        # 암호화 감지
+        if reader.is_encrypted:
+            raise EncryptedFileError(file_path, "pdf")
+
         pages = []
         for i, page in enumerate(reader.pages):
             text = page.extract_text()
@@ -39,6 +46,8 @@ def parse_pdf(file_path: str) -> str:
         logger.info(f"PDF parsed: {path.name} ({len(reader.pages)} pages, {len(full_text)} chars)")
         return full_text
 
+    except EncryptedFileError:
+        raise
     except Exception:
         logger.exception(f"Failed to parse PDF: {file_path}")
         raise

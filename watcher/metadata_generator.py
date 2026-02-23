@@ -149,7 +149,6 @@ def _generate_llm_metadata(
             system=_METADATA_SYSTEM_PROMPT,
             purpose="agent",
             temperature=0.1,
-            timeout=60,
         )
 
         if not response:

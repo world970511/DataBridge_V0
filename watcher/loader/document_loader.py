@@ -1,14 +1,17 @@
 """
 비정형 문서(PDF, DOCX, TXT 등) 처리 파이프라인 모듈.
 
-Tier 1 (업로드 시): 문서에서 텍스트를 추출한 뒤 경량 요약만 생성하여
-ChromaDB의 'documents' 컬렉션에 임베딩합니다. 전체 텍스트는 임베딩하지 않습니다.
+Tier 1 (업로드 시):
+    문서에서 텍스트를 추출한 뒤 TF-IDF 추출적 요약을 생성하여
+    ChromaDB의 'documents' 컬렉션에 임베딩합니다 (LLM 호출 없음, 수 밀리초).
+    동시에 원문 텍스트를 청크로 분할하여 PostgreSQL document_chunks 테이블에 캐시합니다.
 
-Tier 2 (질의 시): doc_agent가 extract_text()를 호출하여 원본 파일을 온디맨드로
-파싱하고, 전체 텍스트를 LLM에 직접 전달합니다.
+Tier 2 (질의 시):
+    doc_agent가 PostgreSQL에서 캐시된 청크를 로드하고 TF-IDF로 질의 관련
+    청크를 선별하여 LLM에 전달합니다 (파일 재파싱 불필요).
 
 Lazy Loading: 파일 크기가 MAX_EMBED_SIZE_MB를 초과하면 임베딩을 건너뛰고
-카탈로그에만 등록합니다 (chunk_count=0). 질의 시 온디맨드로 파싱합니다.
+카탈로그에만 등록합니다 (chunk_count=0). 질의 시 온디맨드로 파싱+캐싱합니다.
 
 처리 결과는 카탈로그와 처리 이력 로그에 기록됩니다.
 """
@@ -19,7 +22,12 @@ from pathlib import Path
 
 from catalog.catalog import register_document
 from config.settings import get_settings
+from rag.parser import EncryptedFileError
 from watcher.loader._utils import log_file_process
+
+# 원문 청크 캐시용 청크 설정 (요약 청크보다 크게 설정하여 문맥 보존)
+_CACHE_CHUNK_SIZE = 1000
+_CACHE_CHUNK_OVERLAP = 100
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +51,15 @@ def _get_file_size_mb(file_path: str) -> float:
 
 def load_document(file_path: str, file_type: str):
     """
-    문서 파일의 Tier 1 처리 파이프라인 (요약만 임베딩).
+    문서 파일의 Tier 1 처리 파이프라인 (요약 임베딩 + 원문 청크 캐시).
 
     처리 흐름:
-    0) 파일 크기 확인 → MAX_EMBED_SIZE_MB 초과 시 Lazy Loading 모드로 전환
-       (카탈로그에만 등록, chunk_count=0, 임베딩 생략)
-    1) 파일 유형에 맞는 파서로 텍스트 추출 →
-    2) generate_summary()로 경량 요약 생성 →
-    3) chunk_text()로 요약 텍스트를 청크로 분할 →
-    4) 기존 임베딩 삭제 후 요약 청크만 ChromaDB에 저장 →
-    5) 카탈로그에 문서 메타데이터(요약 포함) 등록.
-    텍스트 추출 실패나 빈 청크 등 각 단계에서 실패 시 이력을 남기고 종료합니다.
+    0) 파일 크기 확인 → MAX_EMBED_SIZE_MB 초과 시 Lazy Loading 모드
+    1) 파일 유형에 맞는 파서로 텍스트 추출
+    2) TF-IDF 추출적 요약 생성 (LLM 없음, 수 밀리초)
+    3) 요약 청크를 ChromaDB에 저장 (파일 식별용)
+    4) 원문 청크를 PostgreSQL document_chunks에 캐시 (질의 시 재파싱 불필요)
+    5) 카탈로그에 문서 메타데이터 등록
     """
     path = Path(file_path)
     settings = get_settings()
@@ -65,11 +71,11 @@ def load_document(file_path: str, file_type: str):
 
         if file_size_mb > max_size_mb:
             # Lazy Loading: 최소 임베딩만 저장 (검색 가능하도록)
+            # 원문 청크 캐시는 첫 질의 시 온디맨드로 생성됨
             logger.info(
                 f"Lazy loading: {path.name} ({file_size_mb:.1f}MB > {max_size_mb}MB threshold)"
             )
 
-            # 최소 메타데이터로 검색 가능하게 청크 1개 저장
             lazy_summary = (
                 f"문서 파일: {path.name}\n"
                 f"파일 유형: {file_type}\n"
@@ -80,17 +86,15 @@ def load_document(file_path: str, file_type: str):
             from rag.chunker import chunk_text
             from rag.embedder import delete_chunks, store_chunks
 
-            # 기존 임베딩 삭제 후 최소 청크 저장 (재업로드 대응)
             delete_chunks(source=path.name, collection_name=COLLECTION_NAME)
             lazy_chunks = chunk_text(lazy_summary, source=path.name)
             store_chunks(lazy_chunks, collection_name=COLLECTION_NAME)
 
-            # 카탈로그 등록 (chunk_count=0으로 Lazy Loading 표시)
             register_document(
                 doc_name=path.name,
                 source_file=str(file_path),
                 file_type=file_type,
-                chunk_count=0,  # Lazy Loading 표시 (실제 청크는 1개 있음)
+                chunk_count=0,
                 collection_name=COLLECTION_NAME,
                 summary_text=lazy_summary,
             )
@@ -107,7 +111,7 @@ def load_document(file_path: str, file_type: str):
             log_file_process(file_path, file_type, "register_for_search", None, "failed", "No text extracted")
             return
 
-        # 2. 요약 생성
+        # 2. TF-IDF 추출적 요약 생성 (LLM 호출 없음)
         from rag.summarizer import generate_summary
         summary = generate_summary(text, source=path.name)
 
@@ -116,32 +120,63 @@ def load_document(file_path: str, file_type: str):
             log_file_process(file_path, file_type, "register_for_search", None, "failed", "No summary")
             return
 
-        # 3. 요약 텍스트 청킹
+        # 3. 요약 텍스트 청킹 → ChromaDB (파일 식별용, 소량)
         from rag.chunker import chunk_text
-        chunks = chunk_text(summary, source=path.name)
+        summary_chunks = chunk_text(summary, source=path.name)
 
-        if not chunks:
-            logger.warning(f"No chunks generated from: {file_path}")
+        if not summary_chunks:
+            logger.warning(f"No summary chunks from: {file_path}")
             log_file_process(file_path, file_type, "register_for_search", None, "failed", "No chunks")
             return
 
-        # 4. 기존 임베딩 삭제 후 새 요약 청크 저장 (재업로드 대응)
+        # 4. 원문 텍스트 청킹 → PostgreSQL 캐시 (질의 시 재파싱 불필요)
+        full_text_chunks = chunk_text(
+            text, source=path.name,
+            chunk_size=_CACHE_CHUNK_SIZE,
+            chunk_overlap=_CACHE_CHUNK_OVERLAP,
+        )
+
+        # 5. ChromaDB에 요약 임베딩 저장 (재업로드 대응: 기존 삭제 후 삽입)
         from rag.embedder import delete_chunks, store_chunks
         delete_chunks(source=path.name, collection_name=COLLECTION_NAME)
-        store_chunks(chunks, collection_name=COLLECTION_NAME)
+        store_chunks(summary_chunks, collection_name=COLLECTION_NAME)
 
-        # 5. 카탈로그 등록 (요약 텍스트 포함)
-        register_document(
+        # 6. 카탈로그 등록 (RETURNING id로 FK 연결)
+        from catalog.catalog import register_document_returning_id, replace_document_chunks
+        doc_id = register_document_returning_id(
             doc_name=path.name,
             source_file=str(file_path),
             file_type=file_type,
-            chunk_count=len(chunks),
+            chunk_count=len(full_text_chunks),
             collection_name=COLLECTION_NAME,
             summary_text=summary,
         )
 
+        # 7. 원문 청크를 PostgreSQL에 캐시 (재업로드 대응: 기존 삭제 후 삽입)
+        if doc_id and full_text_chunks:
+            replace_document_chunks(doc_id, full_text_chunks)
+
         log_file_process(file_path, file_type, "register_for_search", None, "success")
-        logger.info(f"Document loaded (summary): {path.name} ({len(chunks)} summary chunks)")
+        logger.info(
+            f"Document loaded: {path.name} "
+            f"({len(summary_chunks)} summary chunks, {len(full_text_chunks)} cached chunks)"
+        )
+
+    except EncryptedFileError:
+        logger.warning(f"Encrypted file detected: {file_path}")
+        register_document(
+            doc_name=path.name,
+            source_file=str(file_path),
+            file_type=file_type,
+            chunk_count=0,
+            collection_name=COLLECTION_NAME,
+            summary_text=f"암호화된 파일: {path.name} (비밀번호 필요)",
+            status="encrypted",
+        )
+        log_file_process(
+            file_path, file_type, "register_for_search", None, "failed",
+            "Encrypted file - password required"
+        )
 
     except Exception as e:
         logger.exception(f"Failed to load document: {file_path}")
@@ -168,8 +203,9 @@ def _extract_text(file_path: str, file_type: str) -> str:
     """
     파일 유형에 따라 적절한 파서를 선택하여 텍스트를 추출.
 
-    pdf → pdf_parser.parse_pdf(), docx → python-docx 기반 추출,
-    text → UTF-8로 직접 읽기 (단, CSV 구조 감지 시 CSV 로더로 라우팅).
+    pdf → pdf_parser, doc → doc_parser (OLE2), docx → docx_parser,
+    ppt → ppt_parser (OLE2), pptx → pptx_parser,
+    hwp → hwp_parser/hwpx_parser, text → UTF-8로 직접 읽기 (단, CSV 구조 감지 시 CSV 로더로 라우팅).
     지원하지 않는 유형은 빈 문자열을 반환합니다.
     Returns: 추출된 텍스트 문자열 (실패 또는 미지원 유형은 빈 문자열).
              CSV 구조 감지 시 CSV 로더로 라우팅하고 빈 문자열을 반환.
@@ -177,8 +213,26 @@ def _extract_text(file_path: str, file_type: str) -> str:
     if file_type == "pdf":
         from rag.parser.pdf_parser import parse_pdf
         return parse_pdf(file_path)
+    elif file_type == "doc":
+        from rag.parser.doc_parser import parse_doc
+        return parse_doc(file_path)
     elif file_type == "docx":
-        return _extract_docx(file_path)
+        from rag.parser.docx_parser import parse_docx
+        return parse_docx(file_path)
+    elif file_type == "ppt":
+        from rag.parser.ppt_parser import parse_ppt
+        return parse_ppt(file_path)
+    elif file_type == "pptx":
+        from rag.parser.pptx_parser import parse_pptx
+        return parse_pptx(file_path)
+    elif file_type == "hwp":
+        suffix = Path(file_path).suffix.lower()
+        if suffix == ".hwpx":
+            from rag.parser.hwpx_parser import parse_hwpx
+            return parse_hwpx(file_path)
+        else:
+            from rag.parser.hwp_parser import parse_hwp
+            return parse_hwp(file_path)
     elif file_type == "text":
         # CSV 구조 감지: 텍스트 파일이 실제로는 CSV 데이터일 수 있음
         if _looks_like_csv(file_path):
@@ -327,34 +381,44 @@ def load_document_from_dataframe(
             )
             return
 
-        # 요약 생성
+        # TF-IDF 추출적 요약 생성 (LLM 호출 없음)
         from rag.summarizer import generate_summary
         summary = generate_summary(text, source=path.name)
 
         if not summary:
-            # 폴백: 원본 텍스트 앞부분 사용
             summary = text[:1500]
 
-        # 청킹 및 임베딩
+        # 요약 청킹 → ChromaDB
         from rag.chunker import chunk_text
         from rag.embedder import delete_chunks, store_chunks
 
-        chunks = chunk_text(summary, source=path.name)
+        summary_chunks = chunk_text(summary, source=path.name)
 
-        # 기존 임베딩 삭제 후 새 청크 저장 (재업로드 대응)
         delete_chunks(source=path.name, collection_name=COLLECTION_NAME)
-        if chunks:
-            store_chunks(chunks, collection_name=COLLECTION_NAME)
+        if summary_chunks:
+            store_chunks(summary_chunks, collection_name=COLLECTION_NAME)
 
-        # 카탈로그에 문서로 등록
-        register_document(
+        # 원문 청킹 → PostgreSQL 캐시
+        full_text_chunks = chunk_text(
+            text, source=path.name,
+            chunk_size=_CACHE_CHUNK_SIZE,
+            chunk_overlap=_CACHE_CHUNK_OVERLAP,
+        )
+
+        # 카탈로그 등록 (RETURNING id)
+        from catalog.catalog import register_document_returning_id, replace_document_chunks
+        doc_id = register_document_returning_id(
             doc_name=path.name,
             source_file=str(file_path),
             file_type=file_type,
-            chunk_count=len(chunks),
+            chunk_count=len(full_text_chunks),
             collection_name=COLLECTION_NAME,
             summary_text=summary,
         )
+
+        # 원문 청크 캐시 저장
+        if doc_id and full_text_chunks:
+            replace_document_chunks(doc_id, full_text_chunks)
 
         log_file_process(
             file_path, file_type, "register_for_search", None, "success",
@@ -362,7 +426,8 @@ def load_document_from_dataframe(
         )
         logger.info(
             f"Spreadsheet loaded as document: {path.name} "
-            f"({len(chunks)} summary chunks, category={data_category})"
+            f"({len(summary_chunks)} summary, {len(full_text_chunks)} cached chunks, "
+            f"category={data_category})"
         )
 
     except Exception as e:
