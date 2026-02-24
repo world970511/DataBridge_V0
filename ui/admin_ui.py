@@ -46,9 +46,11 @@ def render_admin_page():
     st.title("관리자 페이지")
 
     # 탭 구성
-    tab_users, tab_audit, tab_system, tab_llm = st.tabs([
+    tab_users, tab_audit, tab_jobs, tab_noti, tab_system, tab_llm = st.tabs([
         "사용자 관리",
         "감사 로그",
+        "배치 작업",
+        "알림 설정",
         "시스템 상태",
         "LLM 설정",
     ])
@@ -58,6 +60,12 @@ def render_admin_page():
 
     with tab_audit:
         _render_audit_tab()
+
+    with tab_jobs:
+        _render_jobs_tab()
+
+    with tab_noti:
+        _render_notification_tab()
 
     with tab_system:
         _render_system_tab()
@@ -290,6 +298,385 @@ def _render_audit_tab():
         st.error(f"로그 조회 실패: {e}")
 
 
+def _render_jobs_tab():
+    """배치 작업 관리 탭."""
+    from agent.tools.manage_jobs import (
+        list_jobs, create_job, toggle_job, delete_job, run_job,
+        get_job_history, get_recent_history,
+    )
+    from jobs.scheduler import is_running as scheduler_is_running, start as scheduler_start, stop as scheduler_stop
+    from auth.session import get_current_user
+
+    st.caption("배치 작업의 등록·실행·이력을 관리합니다.")
+
+    # ── 스케줄러 상태 ──
+    with st.container(border=True):
+        col_status, col_action = st.columns([3, 1])
+        with col_status:
+            if scheduler_is_running():
+                st.success("🟢 스케줄러 실행 중 — 활성 작업이 cron 일정에 따라 자동 실행됩니다.")
+            else:
+                st.warning("🔴 스케줄러 중지됨 — 수동 실행만 가능합니다.")
+        with col_action:
+            if scheduler_is_running():
+                if st.button("⏹ 스케줄러 중지", use_container_width=True):
+                    scheduler_stop()
+                    st.rerun()
+            else:
+                if st.button("▶️ 스케줄러 시작", use_container_width=True):
+                    scheduler_start()
+                    st.rerun()
+
+    st.markdown("---")
+
+    # ── 작업 목록 + 신규 등록 ──
+    col_list, col_add = st.columns([3, 1])
+
+    with col_add:
+        st.markdown("### ➕ 작업 등록")
+        with st.form("add_job_form", clear_on_submit=True):
+            job_name = st.text_input("작업명", placeholder="예: daily_sales_refresh")
+            job_desc = st.text_input("설명", placeholder="예: 일별 매출 마트 갱신")
+            job_sql = st.text_area("SQL", height=120, placeholder="CREATE TABLE mart_... AS SELECT ...")
+            job_cron = st.text_input("Cron 표현식", placeholder="0 7 * * *")
+            st.caption("분 시 일 월 요일 (예: `0 7 * * *` = 매일 07:00)")
+            submitted = st.form_submit_button("등록", use_container_width=True)
+
+        if submitted:
+            if not job_name or not job_sql or not job_cron:
+                st.error("작업명, SQL, Cron은 필수입니다.")
+            else:
+                user = get_current_user()
+                username = user.get("username", "admin") if user else "admin"
+                new_id = create_job(
+                    job_name=job_name.strip(),
+                    description=job_desc,
+                    sql_text=job_sql,
+                    cron_expr=job_cron.strip(),
+                    created_by=username,
+                )
+                if new_id:
+                    st.success(f"작업 등록 완료 (ID: {new_id})")
+                    st.rerun()
+                else:
+                    st.error("작업 등록 실패 — 중복된 이름이거나 Cron 형식이 잘못되었습니다.")
+
+    with col_list:
+        st.markdown("### 등록된 작업")
+
+        show_inactive = st.checkbox("비활성 작업도 표시", value=True, key="jobs_show_inactive")
+        jobs = list_jobs(active_only=not show_inactive)
+
+        if not jobs:
+            st.info("등록된 배치 작업이 없습니다.")
+        else:
+            for job in jobs:
+                jid = job["id"]
+                active = job["is_active"]
+                status_icon = "🟢" if active else "⏸️"
+                last_status = job.get("last_status") or "—"
+                last_run = str(job.get("last_run_at") or "—")[:19]
+
+                with st.expander(
+                    f"{status_icon} **{job['job_name']}** | "
+                    f"최근: {last_status} ({last_run}) | "
+                    f"cron: `{job['cron_expr']}`"
+                ):
+                    # 작업 상세
+                    st.markdown(f"**설명:** {job.get('description') or '—'}")
+                    st.code(job["sql_text"], language="sql")
+                    st.caption(
+                        f"생성자: {job.get('created_by', '—')} | "
+                        f"생성일: {str(job.get('created_at', ''))[:19]}"
+                    )
+
+                    # 액션 버튼
+                    btn_cols = st.columns(4)
+                    with btn_cols[0]:
+                        if active:
+                            if st.button("⏸ 비활성화", key=f"toggle_{jid}"):
+                                toggle_job(jid, False)
+                                st.rerun()
+                        else:
+                            if st.button("▶ 활성화", key=f"toggle_{jid}"):
+                                toggle_job(jid, True)
+                                st.rerun()
+
+                    with btn_cols[1]:
+                        if st.button("🔄 즉시 실행", key=f"run_{jid}"):
+                            with st.spinner("실행 중..."):
+                                result = run_job(jid)
+                            if result["success"]:
+                                st.success(result["message"])
+                            else:
+                                st.error(result["message"])
+
+                    with btn_cols[2]:
+                        if st.button("📜 실행 이력", key=f"history_{jid}"):
+                            st.session_state[f"show_history_{jid}"] = not st.session_state.get(f"show_history_{jid}", False)
+
+                    with btn_cols[3]:
+                        if st.button("🗑 삭제", key=f"delete_{jid}", type="secondary"):
+                            if delete_job(jid):
+                                st.success("작업 삭제됨")
+                                st.rerun()
+                            else:
+                                st.error("삭제 실패")
+
+                    # 실행 이력 표시
+                    if st.session_state.get(f"show_history_{jid}", False):
+                        history = get_job_history(jid, limit=10)
+                        if history:
+                            st.markdown("**최근 실행 이력:**")
+                            for h in history:
+                                h_status = h.get("status", "")
+                                h_icon = "✅" if h_status == "success" else "❌" if h_status == "failed" else "⏳"
+                                h_time = str(h.get("started_at", ""))[:19]
+                                h_elapsed = h.get("execution_time")
+                                h_elapsed_str = f"{h_elapsed:.1f}초" if h_elapsed else "—"
+                                h_rows = h.get("rows_affected", 0)
+                                h_err = h.get("error_message") or ""
+
+                                line = f"{h_icon} {h_time} | {h_status} | {h_rows}행 | {h_elapsed_str}"
+                                if h_err:
+                                    st.markdown(line)
+                                    st.caption(f"⚠ {h_err[:200]}")
+                                else:
+                                    st.markdown(line)
+                        else:
+                            st.info("실행 이력이 없습니다.")
+
+    # ── 전체 최근 이력 ──
+    st.markdown("---")
+    st.markdown("### 📊 전체 최근 실행 이력")
+    recent = get_recent_history(limit=20)
+    if recent:
+        import pandas as pd
+        df = pd.DataFrame(recent)
+        display_cols = ["job_name", "status", "started_at", "rows_affected", "execution_time", "error_message"]
+        existing_cols = [c for c in display_cols if c in df.columns]
+        if existing_cols:
+            df_display = df[existing_cols].copy()
+            col_rename = {
+                "job_name": "작업명",
+                "status": "상태",
+                "started_at": "실행 시각",
+                "rows_affected": "영향 행수",
+                "execution_time": "소요(초)",
+                "error_message": "에러",
+            }
+            df_display.rename(columns={k: v for k, v in col_rename.items() if k in df_display.columns}, inplace=True)
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
+    else:
+        st.info("실행 이력이 없습니다.")
+
+
+def _render_notification_tab():
+    """알림 설정 탭 — 구독 관리 + 발송 이력."""
+    from db.connection import execute_query, execute_command
+    from notifications.events import EVENT_PATTERNS, CHANNELS
+
+    st.caption("이벤트 발생 시 Webhook/Slack/Teams로 알림을 전송합니다.")
+
+    # ── 구독 목록 + 추가 폼 ──
+    col_list, col_add = st.columns([3, 1])
+
+    with col_add:
+        st.markdown("### 구독 추가")
+        with st.form("add_noti_form", clear_on_submit=True):
+            display_name = st.text_input("별명", placeholder="예: 슬랙-파일알림")
+            event_pattern = st.selectbox("이벤트 패턴", EVENT_PATTERNS)
+            custom_pattern = st.text_input(
+                "직접 입력 (위 선택 대신)", placeholder="예: file.*"
+            )
+            channel = st.selectbox("채널", CHANNELS)
+            target = st.text_input("대상 URL", placeholder="https://hooks.slack.com/...")
+            secret = st.text_input("Secret (Webhook HMAC용)", type="password")
+            submitted = st.form_submit_button("등록", use_container_width=True)
+
+        if submitted:
+            pattern = custom_pattern.strip() if custom_pattern.strip() else event_pattern
+            if not target.strip():
+                st.error("대상 URL은 필수입니다.")
+            else:
+                try:
+                    execute_command(
+                        """
+                        INSERT INTO notification_subscriptions
+                            (event_pattern, channel, target, secret, display_name, created_by)
+                        VALUES (%s, %s, %s, %s, %s, 'admin')
+                        """,
+                        (pattern, channel, target.strip(), secret or None, display_name or None),
+                    )
+                    # 캐시 무효화
+                    from notifications.dispatcher import invalidate_cache
+                    invalidate_cache()
+                    st.success(f"구독 등록 완료: {pattern} → {channel}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"등록 실패: {e}")
+
+    with col_list:
+        st.markdown("### 등록된 구독")
+
+        try:
+            subs = execute_query(
+                """
+                SELECT id, event_pattern, channel, target, secret,
+                       display_name, enabled, created_at
+                FROM notification_subscriptions
+                ORDER BY created_at DESC
+                """
+            )
+        except Exception as e:
+            st.error(f"구독 조회 실패: {e}")
+            subs = []
+
+        if not subs:
+            st.info("등록된 알림 구독이 없습니다. 오른쪽 폼에서 추가하세요.")
+        else:
+            for sub in subs:
+                sid = sub["id"]
+                enabled = sub["enabled"]
+                status_icon = "🔔" if enabled else "🔕"
+                name_part = f" ({sub['display_name']})" if sub.get("display_name") else ""
+                target_short = sub["target"][:50] + ("..." if len(sub["target"]) > 50 else "")
+
+                with st.container(border=True):
+                    c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
+
+                    with c1:
+                        st.markdown(
+                            f"{status_icon} **{sub['event_pattern']}** → "
+                            f"`{sub['channel']}`{name_part}"
+                        )
+                        st.caption(target_short)
+
+                    with c2:
+                        if enabled:
+                            if st.button("비활성화", key=f"noti_off_{sid}"):
+                                execute_command(
+                                    "UPDATE notification_subscriptions SET enabled = FALSE, updated_at = NOW() WHERE id = %s",
+                                    (sid,),
+                                )
+                                from notifications.dispatcher import invalidate_cache
+                                invalidate_cache()
+                                st.rerun()
+                        else:
+                            if st.button("활성화", key=f"noti_on_{sid}"):
+                                execute_command(
+                                    "UPDATE notification_subscriptions SET enabled = TRUE, updated_at = NOW() WHERE id = %s",
+                                    (sid,),
+                                )
+                                from notifications.dispatcher import invalidate_cache
+                                invalidate_cache()
+                                st.rerun()
+
+                    with c3:
+                        if st.button("테스트", key=f"noti_test_{sid}"):
+                            _test_notification(sub)
+
+                    with c4:
+                        if st.button("삭제", key=f"noti_del_{sid}", type="secondary"):
+                            execute_command(
+                                "DELETE FROM notification_subscriptions WHERE id = %s",
+                                (sid,),
+                            )
+                            from notifications.dispatcher import invalidate_cache
+                            invalidate_cache()
+                            st.rerun()
+
+    # ── 발송 이력 ──
+    st.markdown("---")
+    st.markdown("### 발송 이력")
+
+    col_filter1, col_filter2 = st.columns(2)
+    with col_filter1:
+        log_status_filter = st.selectbox(
+            "상태", ["전체", "success", "failed"], key="noti_log_status"
+        )
+    with col_filter2:
+        log_limit = st.selectbox("표시 건수", [20, 50, 100], key="noti_log_limit")
+
+    try:
+        status_cond = ""
+        params = []
+        if log_status_filter != "전체":
+            status_cond = "WHERE status = %s"
+            params.append(log_status_filter)
+
+        logs = execute_query(
+            f"""
+            SELECT id, event_type, channel, target, status,
+                   error_message, response_code, elapsed_ms, created_at
+            FROM notification_log
+            {status_cond}
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            tuple(params + [log_limit]),
+        )
+
+        if not logs:
+            st.info("발송 이력이 없습니다.")
+        else:
+            import pandas as pd
+
+            df = pd.DataFrame(logs)
+            display_cols = [
+                "event_type", "channel", "status",
+                "response_code", "elapsed_ms", "error_message", "created_at",
+            ]
+            existing = [c for c in display_cols if c in df.columns]
+            df_display = df[existing].copy()
+            col_rename = {
+                "event_type": "이벤트",
+                "channel": "채널",
+                "status": "상태",
+                "response_code": "HTTP",
+                "elapsed_ms": "소요(ms)",
+                "error_message": "에러",
+                "created_at": "발송 시각",
+            }
+            df_display.rename(
+                columns={k: v for k, v in col_rename.items() if k in df_display.columns},
+                inplace=True,
+            )
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+    except Exception as e:
+        st.error(f"발송 이력 조회 실패: {e}")
+
+
+def _test_notification(subscription: dict):
+    """테스트 알림 전송."""
+    try:
+        from notifications.senders import get_sender
+        from config.settings import get_settings
+
+        sender = get_sender(subscription["channel"])
+        test_payload = {
+            "message": "DataBridge 알림 테스트입니다.",
+            "subscription_id": subscription["id"],
+            "test": True,
+        }
+
+        result = sender.send(
+            target=subscription["target"],
+            event_type="test.ping",
+            payload=test_payload,
+            secret=subscription.get("secret"),
+        )
+
+        if result["success"]:
+            st.success(f"테스트 성공 (HTTP {result.get('status_code', '-')})")
+        else:
+            st.error(f"테스트 실패: {result.get('error', '알 수 없는 오류')}")
+
+    except Exception as e:
+        st.error(f"테스트 발송 실패: {e}")
+
+
 def _render_system_tab():
     """시스템 상태 탭."""
     from db.connection import check_connection
@@ -353,6 +740,9 @@ def _render_system_tab():
             except Exception as e:
                 st.error(f"오류: {e}")
 
+    # ── 외부 DB 상태 ──
+    _render_external_db_status()
+
     st.markdown("### 데이터 통계")
 
     try:
@@ -398,6 +788,97 @@ def _render_system_tab():
 
     except Exception as e:
         st.error(f"활동 조회 실패: {e}")
+
+
+def _render_external_db_status():
+    """외부 DB 연결 상태 섹션."""
+    from config.settings import get_settings
+
+    settings = get_settings()
+    if not settings.external_db.enabled:
+        return  # 비활성이면 섹션 자체를 숨김
+
+    st.markdown("### 외부 DB")
+
+    try:
+        from db.external.registry import (
+            list_external_dbs, sync_schema, register_from_settings,
+        )
+
+        ext_dbs = list_external_dbs()
+
+        if not ext_dbs:
+            # 설정은 있지만 아직 등록 안 됨 → 등록 시도
+            with st.container(border=True):
+                st.info(
+                    f"외부 DB가 설정되어 있지만 아직 연결되지 않았습니다. "
+                    f"({settings.external_db.name} @ {settings.external_db.host}:{settings.external_db.port})"
+                )
+                if st.button("외부 DB 연결"):
+                    with st.spinner("연결 중..."):
+                        ok = register_from_settings()
+                    if ok:
+                        st.success("연결 성공!")
+                        st.rerun()
+                    else:
+                        st.error("연결 실패 — 호스트/포트/인증 정보를 확인하세요.")
+            return
+
+        for db_info in ext_dbs:
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([3, 1, 1])
+
+                with c1:
+                    status_icon = "🟢" if db_info["connected"] else "🔴"
+                    st.markdown(
+                        f"{status_icon} **{db_info['name']}** "
+                        f"(`{db_info['db_type']}`)"
+                    )
+
+                with c2:
+                    if st.button("스키마 동기화", key=f"sync_{db_info['name']}"):
+                        with st.spinner("동기화 중..."):
+                            count = sync_schema(db_info["name"])
+                        if count > 0:
+                            st.success(f"{count}개 테이블 동기화 완료")
+                            st.rerun()
+                        else:
+                            st.warning("동기화할 테이블이 없습니다.")
+
+                with c3:
+                    if st.button("연결 해제", key=f"remove_{db_info['name']}"):
+                        from db.external.registry import remove_external_db
+                        remove_external_db(db_info["name"])
+                        st.rerun()
+
+        # 동기화된 외부 테이블 목록
+        try:
+            from db.connection import execute_query
+            ext_tables = execute_query(
+                """
+                SELECT table_name, row_count, column_count, description
+                FROM catalog_tables
+                WHERE file_type = 'external_db'
+                ORDER BY table_name
+                """
+            )
+            if ext_tables:
+                with st.expander(f"외부 테이블 ({len(ext_tables)}개)"):
+                    for t in ext_tables:
+                        rows_str = f"{t['row_count']:,}" if t.get("row_count") else "?"
+                        cols_str = str(t.get("column_count", "?"))
+                        st.caption(
+                            f"**{t['table_name']}** — "
+                            f"{rows_str}행, {cols_str}열 | "
+                            f"{t.get('description', '')}"
+                        )
+        except Exception:
+            pass
+
+    except ImportError:
+        st.warning("외부 DB 모듈을 로드할 수 없습니다.")
+    except Exception as e:
+        st.error(f"외부 DB 상태 조회 실패: {e}")
 
 
 def _render_llm_settings_tab():

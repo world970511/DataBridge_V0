@@ -95,8 +95,11 @@ def generate_extractive_summary(
     if not sentences:
         return text[:max_chars]
 
-    # 너무 짧거나 긴 문장 필터링
-    valid = [(i, s) for i, s in enumerate(sentences) if 10 <= len(s.strip()) <= 500]
+    # 너무 짧거나 긴 문장 필터링 + 가비지 문장(반복 단어, 점선 목차) 제거
+    valid = [
+        (i, s) for i, s in enumerate(sentences)
+        if 10 <= len(s.strip()) <= 500 and not _is_noise_sentence(s)
+    ]
     if not valid:
         return text[:max_chars]
 
@@ -139,6 +142,32 @@ def generate_extractive_summary(
 
     logger.debug(f"Extractive summary for '{source}': {len(summary)} chars")
     return summary
+
+
+def _is_noise_sentence(text: str) -> bool:
+    """
+    PDF 레이아웃 아티팩트(반복 단어, 목차 점선 등) 노이즈 문장 판별.
+
+    - 고유 단어 비율 < 20% (예: "조달청 조달청 조달청...")
+    - 구두점·특수문자가 전체의 50% 이상 (예: "· · · · · ·")
+    """
+    stripped = text.strip()
+    if not stripped:
+        return True
+
+    # 구두점·특수문자 비율
+    non_content = sum(1 for c in stripped if c in "·.·\t -–—*+=|()[]{}…•●○◎◇◆■□▶▷")
+    if non_content / len(stripped) > 0.5:
+        return True
+
+    # 고유 단어 비율 (단어 반복 감지)
+    words = stripped.split()
+    if len(words) >= 5:
+        unique_ratio = len(set(words)) / len(words)
+        if unique_ratio < 0.2:
+            return True
+
+    return False
 
 
 def _split_into_sentences(text: str) -> list[str]:

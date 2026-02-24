@@ -123,6 +123,10 @@ def classify_file(file_path: str):
 
     logger.info(f"Classified: {file_path} → type={file_type}, action={action}")
 
+    if action != "ignore":
+        from notifications.dispatcher import emit_event
+        emit_event("file.registered", {"file": Path(file_path).name, "type": file_type, "action": action})
+
     if action == "ignore":
         logger.debug(f"Ignoring file: {file_path}")
         return

@@ -153,14 +153,19 @@ def load_document(file_path: str, file_type: str):
         )
 
         # 7. 원문 청크를 PostgreSQL에 캐시 (재업로드 대응: 기존 삭제 후 삽입)
+        #    캐시 저장 실패해도 ChromaDB 임베딩은 이미 완료되었으므로 검색 자체는 가능
+        cached_count = 0
         if doc_id and full_text_chunks:
-            replace_document_chunks(doc_id, full_text_chunks)
+            cached_count = replace_document_chunks(doc_id, full_text_chunks)
 
         log_file_process(file_path, file_type, "register_for_search", None, "success")
         logger.info(
             f"Document loaded: {path.name} "
-            f"({len(summary_chunks)} summary chunks, {len(full_text_chunks)} cached chunks)"
+            f"({len(summary_chunks)} summary chunks, {cached_count} cached chunks)"
         )
+
+        from notifications.dispatcher import emit_event
+        emit_event("file.loaded", {"doc": path.name, "chunks": len(summary_chunks), "cached": cached_count, "type": file_type})
 
     except EncryptedFileError:
         logger.warning(f"Encrypted file detected: {file_path}")
@@ -178,9 +183,15 @@ def load_document(file_path: str, file_type: str):
             "Encrypted file - password required"
         )
 
+        from notifications.dispatcher import emit_event
+        emit_event("file.failed", {"file": path.name, "error": "Encrypted file"})
+
     except Exception as e:
         logger.exception(f"Failed to load document: {file_path}")
         log_file_process(file_path, file_type, "register_for_search", None, "failed", str(e))
+
+        from notifications.dispatcher import emit_event
+        emit_event("file.failed", {"file": path.name, "error": str(e)[:300]})
 
 
 def extract_text(file_path: str, file_type: str) -> str:
@@ -416,9 +427,10 @@ def load_document_from_dataframe(
             summary_text=summary,
         )
 
-        # 원문 청크 캐시 저장
+        # 원문 청크 캐시 저장 (실패해도 검색은 가능)
+        cached_count = 0
         if doc_id and full_text_chunks:
-            replace_document_chunks(doc_id, full_text_chunks)
+            cached_count = replace_document_chunks(doc_id, full_text_chunks)
 
         log_file_process(
             file_path, file_type, "register_for_search", None, "success",
@@ -426,7 +438,7 @@ def load_document_from_dataframe(
         )
         logger.info(
             f"Spreadsheet loaded as document: {path.name} "
-            f"({len(summary_chunks)} summary, {len(full_text_chunks)} cached chunks, "
+            f"({len(summary_chunks)} summary, {cached_count} cached chunks, "
             f"category={data_category})"
         )
 

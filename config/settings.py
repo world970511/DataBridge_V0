@@ -145,6 +145,46 @@ class ImageConfig:
 
 
 @dataclass
+class NotificationConfig:
+    """
+    알림 시스템 설정.
+
+    enabled: 알림 시스템 전체 활성화 여부. False이면 emit_event() 즉시 반환.
+    timeout: 외부 채널(Webhook/Slack/Teams)로 HTTP 전송 시 타임아웃(초).
+    max_retries: 전송 실패 시 재시도 횟수.
+    retry_delay: 재시도 간 대기 시간(초).
+    """
+    enabled: bool = True
+    timeout: int = 10
+    max_retries: int = 2
+    retry_delay: float = 1.0
+
+
+@dataclass
+class ExternalDBConfig:
+    """
+    외부 DB 연결 설정.
+
+    enabled: 외부 DB 연결 활성화 여부.
+    name: 연결 이름 (예: "erp"). 레지스트리에서 이 이름으로 참조.
+    db_type: DB 종류 ("postgresql"). 향후 "mysql" 등 확장 가능.
+    host, port, database, user, password: 접속 정보.
+    max_connections: 커넥션 풀 최대 크기.
+    query_timeout: 쿼리 실행 타임아웃(초).
+    """
+    enabled: bool = False
+    name: str = ""
+    db_type: str = "postgresql"
+    host: str = ""
+    port: int = 5432
+    database: str = ""
+    user: str = ""
+    password: str = ""
+    max_connections: int = 3
+    query_timeout: int = 30
+
+
+@dataclass
 class AuthConfig:
     """
     인증 관련 설정.
@@ -168,6 +208,8 @@ class Settings:
     watcher: WatcherConfig = field(default_factory=WatcherConfig)
     document: DocumentConfig = field(default_factory=DocumentConfig)
     image: ImageConfig = field(default_factory=ImageConfig)
+    notification: NotificationConfig = field(default_factory=NotificationConfig)
+    external_db: ExternalDBConfig = field(default_factory=ExternalDBConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
     app_port: int = 8501
     job_log_dir: str = "./logs/jobs"
@@ -211,6 +253,26 @@ def load_settings() -> Settings:
         watch_dir=os.getenv("WATCH_DIR", "/data"),
         webhook_enabled=os.getenv("WEBHOOK_ENABLED", "true").lower() == "true",
         webhook_secret=os.getenv("WEBHOOK_SECRET", "changeme"),
+    )
+
+    notification = NotificationConfig(
+        enabled=os.getenv("NOTIFICATION_ENABLED", "true").lower() == "true",
+        timeout=int(os.getenv("NOTIFICATION_TIMEOUT", "10")),
+        max_retries=int(os.getenv("NOTIFICATION_MAX_RETRIES", "2")),
+        retry_delay=float(os.getenv("NOTIFICATION_RETRY_DELAY", "1.0")),
+    )
+
+    external_db = ExternalDBConfig(
+        enabled=os.getenv("EXTERNAL_DB_ENABLED", "false").lower() == "true",
+        name=os.getenv("EXTERNAL_DB_NAME_ALIAS", ""),
+        db_type=os.getenv("EXTERNAL_DB_TYPE", "postgresql"),
+        host=os.getenv("EXTERNAL_DB_HOST", ""),
+        port=int(os.getenv("EXTERNAL_DB_PORT", "5432")),
+        database=os.getenv("EXTERNAL_DB_NAME", ""),
+        user=os.getenv("EXTERNAL_DB_USER", ""),
+        password=os.getenv("EXTERNAL_DB_PASSWORD", ""),
+        max_connections=int(os.getenv("EXTERNAL_DB_MAX_CONNECTIONS", "3")),
+        query_timeout=int(os.getenv("EXTERNAL_DB_QUERY_TIMEOUT", "30")),
     )
 
     auth = AuthConfig(
@@ -265,6 +327,8 @@ def load_settings() -> Settings:
         watcher=watcher,
         document=document,
         image=image,
+        notification=notification,
+        external_db=external_db,
         auth=auth,
         app_port=int(os.getenv("APP_PORT", "8501")),
         job_log_dir=os.getenv("JOB_LOG_DIR", "./logs/jobs"),

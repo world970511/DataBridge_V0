@@ -116,9 +116,15 @@ def load_image(file_path: str, file_type: str):
             f"embedding_dim={len(embedding)})"
         )
 
+        from notifications.dispatcher import emit_event
+        emit_event("file.loaded", {"image": path.name, "width": exif_data.width, "height": exif_data.height})
+
     except Exception as e:
         logger.exception(f"Failed to load image: {file_path}")
         log_file_process(file_path, file_type, "register_image", None, "failed", str(e))
+
+        from notifications.dispatcher import emit_event
+        emit_event("file.failed", {"file": path.name, "error": str(e)[:300]})
 
 
 def _build_image_description(image_name: str, exif_data) -> str:

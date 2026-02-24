@@ -86,6 +86,8 @@ def _cleanup_structured_data(file_path: str):
                 file_path, file_type, "delete",
                 ",".join(cleaned_tables), "success",
             )
+            from notifications.dispatcher import emit_event
+            emit_event("file.deleted", {"type": "table", "tables": cleaned_tables, "file": path.name})
 
     except Exception as e:
         logger.exception(f"Failed to clean up structured data for: {path.name}")
@@ -124,6 +126,8 @@ def _cleanup_document(file_path: str):
                 file_path, file_type, "delete", None, "success",
                 f"Removed {deleted_count} chunks",
             )
+            from notifications.dispatcher import emit_event
+            emit_event("file.deleted", {"type": "document", "doc": path.name, "chunks_removed": deleted_count})
         else:
             logger.info(f"No document data found for deleted file: {path.name}")
 
@@ -167,6 +171,8 @@ def _cleanup_image(file_path: str):
                 file_path, file_type, "delete", None, "success",
                 f"Removed {deleted_count} embedding(s)",
             )
+            from notifications.dispatcher import emit_event
+            emit_event("file.deleted", {"type": "image", "image": path.name})
         else:
             logger.info(f"No image data found for deleted file: {path.name}")
 

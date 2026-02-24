@@ -126,11 +126,20 @@ def load_excel(file_path: str, data_category: str = "statistics") -> list[str]:
             "success" if created_tables else "failed",
             None if created_tables else "All sheets empty",
         )
+
+        if created_tables:
+            from notifications.dispatcher import emit_event
+            emit_event("file.loaded", {"tables": created_tables, "count": len(created_tables), "file": path.name})
+
         return created_tables
 
     except Exception as e:
         logger.exception(f"Failed to load Excel: {file_path}")
         log_file_process(file_path, "excel", "load_to_db", None, "failed", str(e))
+
+        from notifications.dispatcher import emit_event
+        emit_event("file.failed", {"file": path.name, "error": str(e)[:300]})
+
         return []
 
 

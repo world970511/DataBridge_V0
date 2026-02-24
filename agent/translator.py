@@ -109,7 +109,6 @@ def translate_if_needed(text: str, query_lang: str) -> str:
             system=system,
             purpose="orchestrator",
             temperature=0.1,
-            timeout=60,
         )
 
         if translated and translated.strip():

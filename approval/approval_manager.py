@@ -116,6 +116,9 @@ def create_request(
                 f"category={sql_category}"
             )
 
+            from notifications.dispatcher import emit_event
+            emit_event("approval.requested", {"id": req_id, "title": title, "by": requested_by, "type": request_type})
+
         return req_id
 
     except Exception as e:
@@ -214,6 +217,10 @@ def approve_request(request_id: int, reviewed_by: str = "admin") -> bool:
                 metadata={"request_id": request_id},
             )
             logger.info(f"Request approved: id={request_id}, by={reviewed_by}")
+
+            from notifications.dispatcher import emit_event
+            emit_event("approval.resolved", {"id": request_id, "status": "approved", "by": reviewed_by})
+
             return True
         else:
             logger.warning(
@@ -263,6 +270,10 @@ def deny_request(
                 metadata={"request_id": request_id, "reason": reason},
             )
             logger.info(f"Request denied: id={request_id}, by={reviewed_by}")
+
+            from notifications.dispatcher import emit_event
+            emit_event("approval.resolved", {"id": request_id, "status": "denied", "by": reviewed_by})
+
             return True
         else:
             logger.warning(

@@ -143,6 +143,9 @@ def _decode_para_text(data: bytes) -> str:
                 # 필드 시작 (확장 바이트 건너뜀)
                 i += 12
             # 그 외 제어 문자는 무시
+        elif 0xD800 <= code <= 0xDFFF:
+            # UTF-16 서로게이트 코드: 단독으로는 유효한 유니코드가 아니므로 무시
+            pass
         else:
             chars.append(chr(code))
 

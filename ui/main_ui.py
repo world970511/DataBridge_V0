@@ -106,17 +106,33 @@ def _run_startup():
     # 5. 기존 파일 초기 스캔 — 이미 마운트된 파일을 처리
     _initial_scan(settings.watcher.watch_dir)
 
+    # 6. 배치 스케줄러 시작 — 등록된 cron 작업 자동 실행
+    try:
+        from jobs.scheduler import start as start_scheduler
+        start_scheduler()
+        logger.info("Batch scheduler started")
+    except Exception as e:
+        logger.warning(f"Batch scheduler start failed: {e}")
+
     return True
 
 
 def _initial_scan(watch_dir: str):
     """
-    앱 시작 시 감시 폴더에 이미 존재하는 파일을 1회 스캔하여 처리.
+    앱 시작 시 감시 폴더에 이미 존재하는 파일을 병렬 스캔하여 처리.
 
     watchdog은 새로 생성/수정되는 파일만 감지하므로,
     Docker 마운트 등으로 사전에 배치된 파일은 별도로 처리해야 합니다.
     classify_file()이 내부적으로 catalog에 UPSERT하므로 중복 처리해도 안전합니다.
+
+    병렬 처리 전략:
+        1. 모든 파일을 확장자 기반으로 3개 카테고리로 분류 (빠른 패턴 매칭)
+        2. 통계(DB)/문서/이미지 각 카테고리를 별도 스레드에서 동시 처리
+        3. 각 로더는 stateless + 커넥션 풀 기반이므로 thread-safe
     """
+    import concurrent.futures
+    from watcher.classifier import get_file_action
+
     watch_path = Path(watch_dir)
     if not watch_path.exists():
         logger.warning(f"Watch directory not found for initial scan: {watch_dir}")
@@ -129,17 +145,68 @@ def _initial_scan(watch_dir: str):
         logger.info("No files found in watch directory for initial scan")
         return
 
-    logger.info(f"Initial scan: {len(files)} file(s) found in {watch_dir}")
-    success, failed = 0, 0
-    for file_path in files:
-        try:
-            logger.info(f"Initial scan processing: {file_path.name}")
-            classify_file(str(file_path))
-            success += 1
-        except Exception:
-            failed += 1
-            logger.exception(f"Initial scan error: {file_path}")
-    logger.info(f"Initial scan complete: {success} succeeded, {failed} failed")
+    # ── 파일을 3개 카테고리로 분류 (확장자 패턴 매칭만, 로딩 없음) ──
+    db_files = []       # CSV, Excel → PostgreSQL
+    doc_files = []      # PDF, DOCX, TXT, HWP 등 → ChromaDB
+    image_files = []    # JPG, PNG 등 → DINOv2 + ChromaDB
+
+    for f in files:
+        action = get_file_action(str(f))
+        if action == "load_to_db":
+            db_files.append(f)
+        elif action == "register_for_search":
+            doc_files.append(f)
+        elif action == "register_image":
+            image_files.append(f)
+        # ignore → 건너뜀
+
+    total = len(db_files) + len(doc_files) + len(image_files)
+    logger.info(
+        f"Initial scan: {len(files)} files found, {total} to process "
+        f"(DB:{len(db_files)}, DOC:{len(doc_files)}, IMG:{len(image_files)})"
+    )
+
+    if total == 0:
+        return
+
+    def _process_queue(file_list: list, category: str) -> tuple[int, int]:
+        """카테고리별 파일 큐를 순차 처리하는 워커 스레드."""
+        success, failed = 0, 0
+        for fp in file_list:
+            try:
+                logger.info(f"[{category}] Processing: {fp.name}")
+                classify_file(str(fp))
+                success += 1
+            except Exception:
+                failed += 1
+                logger.exception(f"[{category}] Error: {fp.name}")
+        logger.info(f"[{category}] Done: {success} ok, {failed} failed")
+        return success, failed
+
+    # ── 3개 스레드로 병렬 처리 ──
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=3, thread_name_prefix="scan"
+    ) as executor:
+        futures = {}
+        if db_files:
+            futures["통계/DB"] = executor.submit(_process_queue, db_files, "통계/DB")
+        if doc_files:
+            futures["문서"] = executor.submit(_process_queue, doc_files, "문서")
+        if image_files:
+            futures["이미지"] = executor.submit(_process_queue, image_files, "이미지")
+
+        total_success, total_failed = 0, 0
+        for name, future in futures.items():
+            try:
+                s, f = future.result()  # 완료까지 대기 (LLM은 백그라운드로 분리됨)
+                total_success += s
+                total_failed += f
+            except Exception as e:
+                logger.error(f"[{name}] Worker failed: {e}")
+
+    logger.info(
+        f"Initial scan complete: {total_success} succeeded, {total_failed} failed"
+    )
 
 
 def main():
