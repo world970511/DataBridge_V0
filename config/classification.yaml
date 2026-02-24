@@ -40,5 +40,9 @@ rules:
     action: load_to_db
 
   # 비정형 문서 → 검색 등록 (요약 임베딩 + 온디맨드 파싱)
-  - patterns: ["*.pdf", "*.hwp", "*.hwpx", "*.docx", "*.txt"]
+  - patterns: ["*.pdf", "*.hwp", "*.hwpx", "*.doc", "*.docx", "*.ppt", "*.pptx", "*.txt"]
     action: register_for_search
+
+  # 이미지 → EXIF 추출 + DINOv2 임베딩 + 썸네일 생성
+  - patterns: ["*.jpg", "*.jpeg", "*.png", "*.tiff", "*.tif", "*.bmp", "*.webp", "*.heic"]
+    action: register_image

@@ -263,6 +263,55 @@ CREATE TABLE IF NOT EXISTS llm_settings (
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ============================================
+-- 7. 알림 구독 및 발송 이력
+-- ============================================
+-- 이벤트 패턴별로 알림 채널(Webhook/Slack/Teams)을 구독합니다.
+-- event_pattern은 와일드카드를 지원합니다: 'file.*', 'job.failed', '*' 등.
+CREATE TABLE IF NOT EXISTS notification_subscriptions (
+    id              SERIAL PRIMARY KEY,
+    event_pattern   VARCHAR(100) NOT NULL,
+    -- 이벤트 패턴: 'file.*', 'job.failed', 'mart.created', '*' 등
+    channel         VARCHAR(50) NOT NULL,
+    -- 전송 채널: 'webhook', 'slack', 'teams'
+    target          TEXT NOT NULL,
+    -- 전송 대상 URL (Webhook URL, Slack Incoming Webhook URL, Teams Connector URL)
+    secret          TEXT,
+    -- HMAC 서명용 비밀 키 (webhook 채널 전용)
+    display_name    VARCHAR(200),
+    -- 구독 별명 (관리 UI에서 식별용)
+    enabled         BOOLEAN DEFAULT TRUE,
+    created_by      VARCHAR(100) DEFAULT 'admin',
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_noti_sub_enabled ON notification_subscriptions(enabled);
+CREATE INDEX IF NOT EXISTS idx_noti_sub_event ON notification_subscriptions(event_pattern);
+
+-- 알림 발송 이력. 성공/실패, 응답 코드, 소요 시간을 기록합니다.
+CREATE TABLE IF NOT EXISTS notification_log (
+    id              SERIAL PRIMARY KEY,
+    subscription_id INTEGER REFERENCES notification_subscriptions(id) ON DELETE SET NULL,
+    event_type      VARCHAR(100) NOT NULL,
+    channel         VARCHAR(50) NOT NULL,
+    target          TEXT NOT NULL,
+    payload         JSONB,
+    status          VARCHAR(20) NOT NULL,
+    -- 'success', 'failed'
+    error_message   TEXT,
+    response_code   INTEGER,
+    elapsed_ms      INTEGER,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_noti_log_created ON notification_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_noti_log_event ON notification_log(event_type);
+
+-- 기존 배포 마이그레이션 (알림 시스템):
+-- CREATE TABLE IF NOT EXISTS notification_subscriptions ( ... );  -- 위 DDL 참조
+-- CREATE TABLE IF NOT EXISTS notification_log ( ... );            -- 위 DDL 참조
+
 -- 초기 설정값 삽입 (ON CONFLICT로 중복 방지)
 INSERT INTO llm_settings (setting_key, setting_value, description) VALUES
     ('orchestrator_provider', 'ollama', '오케스트레이터 LLM 프로바이더 (ollama/openai/anthropic)'),

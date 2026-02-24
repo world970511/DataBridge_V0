@@ -386,6 +386,13 @@ def classify_intent(question: str) -> str:
     # "문서 내용을 바탕으로 통계에서 필요한 부분만 추출해줘" 같은 교차 질의
     _COMPOSITE_MIN_SCORE = 2  # 양쪽 모두 이 점수 이상이어야 composite 후보
     if data_score >= _COMPOSITE_MIN_SCORE and doc_score >= _COMPOSITE_MIN_SCORE:
+        # 이미지 점수가 data/doc 양쪽보다 높으면 composite 대신 image 우선
+        if image_score > data_score and image_score > doc_score:
+            logger.info(
+                f"Image intent overrides composite: image={image_score} > "
+                f"data={data_score}, doc={doc_score}"
+            )
+            return "image"
         # 양쪽 모두 충분한 점수 → composite로 분류
         # (이미지는 composite 대상에서 제외: 데이터+문서 교차만 지원)
         logger.info(

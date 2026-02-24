@@ -247,6 +247,9 @@ def create_mart(
         },
     )
 
+    from notifications.dispatcher import emit_event
+    emit_event("mart.created", {"mart": extracted_name, "rows": row_count, "columns": column_count, "user": user_id})
+
     return {
         "success": True,
         "answer": answer,

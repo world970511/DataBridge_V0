@@ -296,54 +296,66 @@ def replace_document_chunks(doc_id: int, chunks) -> int:
 
     재업로드 시 기존 청크를 완전히 교체합니다.
     Chunk 데이터클래스 리스트 또는 dict 리스트 모두 지원.
+    document_chunks 테이블 미존재 시 0 반환 (마이그레이션 전 호환).
 
     Returns: 저장된 청크 수.
     """
-    with get_cursor() as cur:
-        cur.execute("DELETE FROM document_chunks WHERE document_id = %s", (doc_id,))
+    try:
+        with get_cursor() as cur:
+            cur.execute("DELETE FROM document_chunks WHERE document_id = %s", (doc_id,))
 
-        count = 0
-        char_offset = 0
-        for i, chunk in enumerate(chunks):
-            if hasattr(chunk, "text"):
-                chunk_text = chunk.text
-                chunk_index = chunk.metadata.get("chunk_index", i)
-            elif isinstance(chunk, dict):
-                chunk_text = chunk.get("chunk_text", chunk.get("text", ""))
-                chunk_index = chunk.get("chunk_index", i)
-            else:
-                continue
+            count = 0
+            char_offset = 0
+            for i, chunk in enumerate(chunks):
+                if hasattr(chunk, "text"):
+                    chunk_text = chunk.text
+                    chunk_index = chunk.metadata.get("chunk_index", i)
+                elif isinstance(chunk, dict):
+                    chunk_text = chunk.get("chunk_text", chunk.get("text", ""))
+                    chunk_index = chunk.get("chunk_index", i)
+                else:
+                    continue
 
-            cur.execute(
-                """
-                INSERT INTO document_chunks
-                    (document_id, chunk_index, chunk_text, char_offset, char_length)
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (doc_id, chunk_index, chunk_text, char_offset, len(chunk_text)),
-            )
-            char_offset += len(chunk_text)
-            count += 1
+                cur.execute(
+                    """
+                    INSERT INTO document_chunks
+                        (document_id, chunk_index, chunk_text, char_offset, char_length)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (doc_id, chunk_index, chunk_text, char_offset, len(chunk_text)),
+                )
+                char_offset += len(chunk_text)
+                count += 1
 
-    logger.info(f"Replaced {count} cached chunks for document_id={doc_id}")
-    return count
+        logger.info(f"Replaced {count} cached chunks for document_id={doc_id}")
+        return count
+
+    except Exception as e:
+        logger.warning(f"Failed to save document_chunks for doc_id={doc_id}: {e}")
+        return 0
 
 
 def get_document_chunks(doc_id: int) -> list[dict]:
     """
     문서의 캐시된 청크를 chunk_index 순으로 조회.
 
+    document_chunks 테이블이 미존재 시 빈 리스트 반환 (마이그레이션 전 호환).
+
     Returns: [{"chunk_text": str, "chunk_index": int, ...}] 리스트.
     """
-    return execute_query(
-        """
-        SELECT chunk_text, chunk_index, char_offset, char_length
-        FROM document_chunks
-        WHERE document_id = %s
-        ORDER BY chunk_index
-        """,
-        (doc_id,),
-    )
+    try:
+        return execute_query(
+            """
+            SELECT chunk_text, chunk_index, char_offset, char_length
+            FROM document_chunks
+            WHERE document_id = %s
+            ORDER BY chunk_index
+            """,
+            (doc_id,),
+        )
+    except Exception as e:
+        logger.warning(f"Failed to query document_chunks (table may not exist): {e}")
+        return []
 
 
 def delete_document_chunks(doc_id: int) -> int:

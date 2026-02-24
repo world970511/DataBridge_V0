@@ -100,6 +100,9 @@ def execute_job(job_id: int) -> dict:
         message = f"배치 작업 '{job_name}' 완료: {rows_affected}행, {elapsed:.1f}초"
         logger.info(message)
 
+        from notifications.dispatcher import emit_event
+        emit_event("job.completed", {"job": job_name, "job_id": job_id, "rows": rows_affected, "seconds": round(elapsed, 1)})
+
         return {
             "success": True,
             "message": message,
@@ -118,6 +121,9 @@ def execute_job(job_id: int) -> dict:
 
         message = f"배치 작업 '{job_name}' 실패: {error_msg}"
         logger.error(message)
+
+        from notifications.dispatcher import emit_event
+        emit_event("job.failed", {"job": job_name, "job_id": job_id, "error": error_msg[:300], "seconds": round(elapsed, 1)})
 
         return {
             "success": False,

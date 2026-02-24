@@ -200,6 +200,7 @@ def _load_relevant_chunks(source_name: str, query: str) -> list[dict]:
     PostgreSQL에서 캐시된 청크를 로드하고 TF-IDF로 질의 관련성 순으로 재순위화.
 
     캐시된 청크가 없으면 온디맨드로 파싱하여 캐시한 뒤 재순위화합니다 (lazy caching).
+    document_chunks 테이블이 없거나 조회 실패 시에도 온디맨드 파싱으로 폴백합니다.
 
     Returns:
         [{"text": str, "chunk_index": int, "score": float}, ...] 관련성 내림차순.
@@ -215,7 +216,12 @@ def _load_relevant_chunks(source_name: str, query: str) -> list[dict]:
     if not doc_id:
         return []
 
-    chunks = get_document_chunks(doc_id)
+    # 캐시된 청크 로드 (테이블 미존재 등 예외 시 빈 리스트로 폴백)
+    chunks = []
+    try:
+        chunks = get_document_chunks(doc_id)
+    except Exception as e:
+        logger.warning(f"Failed to load cached chunks (table may not exist): {e}")
 
     # 캐시가 없으면 온디맨드 파싱 + 캐싱 (하위 호환)
     if not chunks:
@@ -227,6 +233,36 @@ def _load_relevant_chunks(source_name: str, query: str) -> list[dict]:
     return _rerank_chunks_tfidf(chunks, query)
 
 
+def _is_low_quality_chunk(text: str) -> bool:
+    """
+    정보 밀도가 낮은 가비지 청크 판별.
+
+    PDF 레이아웃 아티팩트(반복 단어, 목차 점선 등)를 필터링합니다.
+    - 고유 단어 비율 < 20% (예: "조달청" 24회 반복)
+    - 구두점/특수문자가 전체의 50% 이상 (예: "· · · · · ·")
+    - 실제 텍스트가 30자 미만
+    """
+    import re
+
+    stripped = text.strip()
+    if len(stripped) < 30:
+        return True
+
+    # 구두점·특수문자 비율
+    non_content = len(re.findall(r"[·\.\-\s\*\+\=\|\(\)\[\]\{\}…]", stripped))
+    if non_content / len(stripped) > 0.5:
+        return True
+
+    # 고유 단어 비율 (단어 반복 감지)
+    words = stripped.split()
+    if len(words) >= 5:
+        unique_ratio = len(set(words)) / len(words)
+        if unique_ratio < 0.2:
+            return True
+
+    return False
+
+
 def _rerank_chunks_tfidf(
     chunks: list[dict],
     query: str,
@@ -235,6 +271,8 @@ def _rerank_chunks_tfidf(
     """
     TF-IDF 코사인 유사도로 청크를 질의에 대한 관련성 순으로 재순위화.
 
+    가비지 청크(반복 단어, 목차 점선 등)를 사전 필터링합니다.
+
     Returns:
         관련성 내림차순 정렬된 청크 리스트 (score 필드 추가).
     """
@@ -242,7 +280,15 @@ def _rerank_chunks_tfidf(
     from sklearn.metrics.pairwise import cosine_similarity
     import numpy as np
 
-    chunk_texts = [c["chunk_text"] for c in chunks]
+    # 가비지 청크 필터링
+    filtered = [(i, c) for i, c in enumerate(chunks) if not _is_low_quality_chunk(c["chunk_text"])]
+
+    if not filtered:
+        # 전부 필터링되면 원본 그대로 사용
+        filtered = list(enumerate(chunks))
+
+    orig_indices, filtered_chunks = zip(*filtered)
+    chunk_texts = [c["chunk_text"] for c in filtered_chunks]
 
     try:
         vectorizer = TfidfVectorizer(max_features=5000)
@@ -259,9 +305,10 @@ def _rerank_chunks_tfidf(
         result = []
         for idx in ranked_indices:
             if similarities[idx] > 0:
+                orig_idx = orig_indices[idx]
                 result.append({
                     "text": chunk_texts[idx],
-                    "chunk_index": chunks[idx].get("chunk_index", idx),
+                    "chunk_index": chunks[orig_idx].get("chunk_index", orig_idx),
                     "score": float(similarities[idx]),
                 })
         return result
@@ -280,10 +327,10 @@ def _parse_and_cache_chunks(doc_info: dict) -> list[dict]:
 
     기존 문서(document_chunks 테이블 도입 전 등록된 문서)의 하위 호환을 위해
     첫 질의 시 자동으로 파싱+캐싱합니다.
+    캐시 저장 실패(테이블 미존재 등)에도 파싱된 청크는 반환합니다.
     """
     from watcher.loader.document_loader import extract_text
     from rag.chunker import chunk_text
-    from catalog.catalog import replace_document_chunks
 
     file_path = doc_info.get("source_file", "")
     file_type = doc_info.get("file_type", "")
@@ -300,9 +347,14 @@ def _parse_and_cache_chunks(doc_info: dict) -> list[dict]:
 
     chunks = chunk_text(text, source=doc_name, chunk_size=1000, chunk_overlap=100)
 
+    # 캐시 저장 시도 (실패해도 파싱된 청크는 그대로 반환)
     if doc_id and chunks:
-        replace_document_chunks(doc_id, chunks)
-        logger.info(f"Lazy-cached {len(chunks)} chunks for document '{doc_name}'")
+        try:
+            from catalog.catalog import replace_document_chunks
+            replace_document_chunks(doc_id, chunks)
+            logger.info(f"Lazy-cached {len(chunks)} chunks for document '{doc_name}'")
+        except Exception as e:
+            logger.warning(f"Failed to cache chunks for '{doc_name}' (table may not exist): {e}")
 
     return [
         {"chunk_text": c.text, "chunk_index": c.metadata.get("chunk_index", i)}

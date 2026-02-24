@@ -20,6 +20,25 @@ services:
       timeout: 5s
       retries: 5
 
+  external-postgres:
+    image: postgres:16-alpine
+    container_name: databridge-external-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: company_erp
+      POSTGRES_USER: readonly
+      POSTGRES_PASSWORD: readonly1234
+    ports:
+      - "5433:5432"
+    volumes:
+      - external_pg_data:/var/lib/postgresql/data
+      - ./db/external_seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U readonly -d company_erp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   chromadb:
     image: chromadb/chroma:0.5.23
     container_name: databridge-chromadb
@@ -47,6 +66,8 @@ services:
         condition: service_healthy
       chromadb:
         condition: service_healthy
+      external-postgres:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -64,10 +85,17 @@ services:
       LLM_TIMEOUT: ${LLM_TIMEOUT:-300}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin1234}
       SECRET_KEY: ${SECRET_KEY:-databridge-secret-key-change-me}
+      EXTERNAL_DB_ENABLED: ${EXTERNAL_DB_ENABLED:-true}
+      EXTERNAL_DB_NAME_ALIAS: ${EXTERNAL_DB_NAME_ALIAS:-erp}
+      EXTERNAL_DB_HOST: external-postgres
+      EXTERNAL_DB_PORT: 5432
+      EXTERNAL_DB_NAME: company_erp
+      EXTERNAL_DB_USER: readonly
+      EXTERNAL_DB_PASSWORD: readonly1234
     ports:
       - "${APP_PORT:-8501}:8501"
     volumes:
-      - ${WATCH_DIR_HOST:-./sample_data}:/data:ro
+      - ${WATCH_DIR_HOST:-./sample_data}:/data
       - app_logs:/app/logs
       - app_thumbnails:/app/thumbnails
       - torch_cache:/root/.cache/torch
@@ -85,6 +113,7 @@ services:
 
 volumes:
   postgres_data:
+  external_pg_data:
   chroma_data:
   app_logs:
   app_thumbnails:

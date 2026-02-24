@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
-from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 
 from config.settings import get_settings
 from watcher.classifier import classify_file
@@ -148,7 +148,7 @@ def start_watcher(watch_dir: Optional[str] = None, blocking: bool = True):
         watch_path.mkdir(parents=True, exist_ok=True)
 
     handler = FileEventHandler()
-    observer = Observer()
+    observer = PollingObserver(timeout=5)
     observer.schedule(handler, str(watch_path), recursive=True)
     observer.start()
     logger.info(f"File watcher started: {watch_dir}")

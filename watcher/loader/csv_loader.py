@@ -145,11 +145,19 @@ def load_csv(file_path: str, data_category: str = "statistics") -> Optional[str]
 
         log_file_process(file_path, "csv", "load_to_db", table_name, "success")
         logger.info(f"CSV loaded: {file_path} → {table_name} ({len(df)} rows)")
+
+        from notifications.dispatcher import emit_event
+        emit_event("file.loaded", {"table": table_name, "rows": len(df), "columns": len(df.columns), "file": path.name})
+
         return table_name
 
     except Exception as e:
         logger.exception(f"Failed to load CSV: {file_path}")
         log_file_process(file_path, "csv", "load_to_db", table_name, "failed", str(e))
+
+        from notifications.dispatcher import emit_event
+        emit_event("file.failed", {"file": path.name, "error": str(e)[:300]})
+
         return None
 
 

@@ -8,10 +8,12 @@ SQL SELECT 쿼리 검증 및 안전 실행 도구.
 2. **단일 문장**: 세미콜론(;)으로 구분된 다중 SQL 문 차단
 3. **행 수 제한**: AgentConfig.max_query_rows(기본 5000행) 초과 시 truncation 표시
 4. **타임아웃**: AgentConfig.query_timeout(기본 30초)을 PostgreSQL statement_timeout으로 설정
+5. **외부 DB 라우팅**: catalog에 외부 DB로 등록된 테이블은 자동으로 외부 커넥터로 라우팅
 
 의존 모듈:
     - config.settings: get_settings() → AgentConfig(max_query_rows, query_timeout)
     - db.connection: get_cursor(dict_cursor=True) — 커서 획득
+    - db.external.registry: 외부 DB 라우팅 (선택적)
 
 사용 예시:
     from agent.tools.query_db import validate_sql, execute_select
@@ -42,6 +44,13 @@ _FORBIDDEN_KEYWORDS = re.compile(
 # SQL 주석을 탐지하는 패턴. '--' 라인 주석과 '/* */' 블록 주석을 모두 차단합니다.
 # 주석을 통한 SQL 인젝션(예: SELECT 1; -- DROP TABLE)을 방지합니다.
 _COMMENT_PATTERN = re.compile(r"(--|/\*|\*/)")
+
+# FROM/JOIN 뒤의 테이블명을 추출하는 정규식.
+# "FROM table_name", "JOIN table_name" 패턴 매칭 (별칭 무시).
+_TABLE_REF_PATTERN = re.compile(
+    r"\b(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+    re.IGNORECASE,
+)
 
 
 def validate_sql(sql: str) -> tuple[bool, str]:
@@ -92,6 +101,80 @@ def validate_sql(sql: str) -> tuple[bool, str]:
     return True, "Valid SELECT query"
 
 
+def _extract_table_names(sql: str) -> list[str]:
+    """SQL에서 FROM/JOIN 뒤의 테이블명을 추출."""
+    return _TABLE_REF_PATTERN.findall(sql)
+
+
+def _detect_query_target(sql: str) -> str:
+    """
+    SQL에서 참조하는 테이블의 원본 DB를 판별.
+
+    Returns:
+        "internal" — 내부 DB 테이블이거나 판별 불가.
+        "external:{name}" — 외부 DB 테이블.
+        "mixed" — 내부+외부 혼합 (크로스 DB 조인 불가).
+    """
+    try:
+        from db.external.registry import is_external_table
+    except ImportError:
+        return "internal"
+
+    tables = _extract_table_names(sql)
+    if not tables:
+        return "internal"
+
+    external_names = set()
+    has_internal = False
+
+    for table in tables:
+        ext_name = is_external_table(table)
+        if ext_name:
+            external_names.add(ext_name)
+        else:
+            has_internal = True
+
+    if external_names and has_internal:
+        return "mixed"
+    if external_names:
+        # 모든 테이블이 같은 외부 DB인지 확인
+        if len(external_names) == 1:
+            return f"external:{next(iter(external_names))}"
+        return "mixed"  # 서로 다른 외부 DB 간 조인
+    return "internal"
+
+
+def _execute_external_select(sql: str, db_name: str) -> dict:
+    """외부 DB에서 SELECT 쿼리를 실행."""
+    from db.external.registry import get_external_db
+
+    plugin = get_external_db(db_name)
+    if not plugin:
+        return {
+            "success": False,
+            "data": [],
+            "row_count": 0,
+            "truncated": False,
+            "error": f"외부 DB '{db_name}'에 연결되어 있지 않습니다.",
+            "sql": sql,
+        }
+
+    settings = get_settings()
+    max_rows = settings.agent.max_query_rows
+    timeout = settings.external_db.query_timeout
+
+    result = plugin.execute_query(sql, max_rows=max_rows, timeout=timeout)
+    if result["success"]:
+        logger.info(
+            f"External SELECT ({db_name}): {result['row_count']} rows, "
+            f"truncated={result['truncated']}"
+        )
+    else:
+        logger.error(f"External SELECT ({db_name}) failed: {result['error']}")
+
+    return result
+
+
 def execute_select(sql: str) -> dict:
     """
     검증된 SELECT SQL을 안전하게 실행하고 결과를 딕셔너리로 반환.
@@ -136,6 +219,22 @@ def execute_select(sql: str) -> dict:
             "sql": sql,
         }
 
+    # 외부 DB 라우팅 판별
+    target = _detect_query_target(sql)
+    if target == "mixed":
+        return {
+            "success": False,
+            "data": [],
+            "row_count": 0,
+            "truncated": False,
+            "error": "내부 DB와 외부 DB 테이블을 함께 조인할 수 없습니다. 각각 별도로 조회해 주세요.",
+            "sql": sql,
+        }
+    if target.startswith("external:"):
+        db_name = target.split(":", 1)[1]
+        return _execute_external_select(sql, db_name)
+
+    # 내부 DB 실행
     settings = get_settings()
     max_rows = settings.agent.max_query_rows
     timeout_ms = settings.agent.query_timeout * 1000  # 초 → 밀리초
