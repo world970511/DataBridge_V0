@@ -22,6 +22,9 @@ MART_FAILED = "mart.failed"           # 마트 생성 실패
 JOB_COMPLETED = "job.completed"       # 배치 잡 실행 성공
 JOB_FAILED = "job.failed"             # 배치 잡 실행 실패
 
+# ── 외부 DB ──
+EXTERNAL_DB_SYNCED = "external_db.synced"  # 외부 DB 스키마 동기화 완료
+
 # ── 승인 ──
 APPROVAL_REQUESTED = "approval.requested"  # 승인 요청 생성
 APPROVAL_RESOLVED = "approval.resolved"    # 승인/거부 완료
@@ -40,6 +43,8 @@ EVENT_PATTERNS = [
     "job.*",
     JOB_COMPLETED,
     JOB_FAILED,
+    "external_db.*",
+    EXTERNAL_DB_SYNCED,
     "approval.*",
     APPROVAL_REQUESTED,
     APPROVAL_RESOLVED,
