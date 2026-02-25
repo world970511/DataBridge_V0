@@ -114,6 +114,18 @@ def _run_startup():
     except Exception as e:
         logger.warning(f"Batch scheduler start failed: {e}")
 
+    # 7. 외부 DB 자동 연결 — 설정이 enabled이면 시작 시 자동 등록 + 스키마 동기화
+    try:
+        from db.external.registry import register_from_settings, sync_schema, list_external_dbs
+        if register_from_settings():
+            ext_dbs = list_external_dbs()
+            if ext_dbs:
+                sync_schema(ext_dbs[0]["name"])
+                logger.info(f"External DB auto-connected: {ext_dbs[0]['name']}")
+        # enabled=False이거나 설정 미완료면 조용히 스킵 (register_from_settings 내부에서 로깅)
+    except Exception as e:
+        logger.warning(f"External DB auto-connect failed (non-critical): {e}")
+
     return True
 
 

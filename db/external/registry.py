@@ -183,7 +183,8 @@ def sync_schema(name: str) -> int:
     logger.info(f"Schema sync complete: {count}/{len(tables)} tables from '{name}'")
 
     from notifications.dispatcher import emit_event
-    emit_event("external_db.synced", {"name": name, "tables": count})
+    from notifications.events import EXTERNAL_DB_SYNCED
+    emit_event(EXTERNAL_DB_SYNCED, {"name": name, "tables": count})
 
     return count
 
