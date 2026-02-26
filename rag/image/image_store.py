@@ -142,11 +142,12 @@ def search_similar_by_image_name(
 
     try:
         existing = collection.get(ids=[image_name], include=["embeddings"])
-        if not existing["embeddings"] or not existing["embeddings"][0]:
+        embeddings = existing["embeddings"]
+        if embeddings is None or len(embeddings) == 0 or len(embeddings[0]) == 0:
             logger.warning(f"No embedding found for: {image_name}")
             return []
 
-        embedding = existing["embeddings"][0]
+        embedding = embeddings[0]
         # n_results+1 → 자기 자신 제외
         results = search_similar_images(embedding, n_results=n_results + 1)
         return [r for r in results if r["image_name"] != image_name][:n_results]
