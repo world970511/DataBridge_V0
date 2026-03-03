@@ -24,6 +24,8 @@ services:
     image: postgres:16-alpine
     container_name: databridge-external-db
     restart: unless-stopped
+    profiles:
+      - external-db
     environment:
       POSTGRES_DB: company_erp
       POSTGRES_USER: readonly
@@ -66,8 +68,6 @@ services:
         condition: service_healthy
       chromadb:
         condition: service_healthy
-      external-postgres:
-        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -85,7 +85,7 @@ services:
       LLM_TIMEOUT: ${LLM_TIMEOUT:-300}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin1234}
       SECRET_KEY: ${SECRET_KEY:-databridge-secret-key-change-me}
-      EXTERNAL_DB_ENABLED: ${EXTERNAL_DB_ENABLED:-true}
+      EXTERNAL_DB_ENABLED: ${EXTERNAL_DB_ENABLED:-false}
       EXTERNAL_DB_NAME_ALIAS: ${EXTERNAL_DB_NAME_ALIAS:-erp}
       EXTERNAL_DB_HOST: external-postgres
       EXTERNAL_DB_PORT: 5432

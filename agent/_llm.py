@@ -388,8 +388,14 @@ def _generate_huggingface(
         )
         return result
 
+    except StopIteration:
+        logger.error(
+            f"HuggingFace 모델 '{config.model}'은(는) Inference API를 지원하지 않습니다. "
+            f"HF Inference API 지원 모델로 변경해 주세요."
+        )
+        return ""
     except Exception as e:
-        logger.error(f"HuggingFace API error: {e}")
+        logger.error(f"HuggingFace API error: {type(e).__name__}: {e}")
         return ""
 
 

@@ -321,7 +321,7 @@ def _update_catalog_metadata(
         params.append(description)
     if tags:
         updates.append("tags = %s")
-        params.append(json.dumps(tags, ensure_ascii=False))
+        params.append(tags)  # psycopg2가 list → PostgreSQL TEXT[] 자동 변환
     if column_descriptions:
         updates.append("column_descriptions = %s")
         params.append(json.dumps(column_descriptions, ensure_ascii=False))

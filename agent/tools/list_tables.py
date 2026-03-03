@@ -75,9 +75,15 @@ def get_all_tables_summary() -> str:
         description = table.get("description")
         tags = table.get("tags")
         column_descs = table.get("column_descriptions")
+        source_file = table.get("source_file", "")
+
+        # 외부 테이블 표시
+        ext_label = ""
+        if source_file.startswith("external:"):
+            ext_label = " [EXTERNAL]"
 
         # Basic info
-        lines.append(f"### {idx}. {table_name} ({row_count:,} rows)")
+        lines.append(f"### {idx}. {table_name} ({row_count:,} rows){ext_label}")
 
         # Description (Rich Catalog)
         if description:

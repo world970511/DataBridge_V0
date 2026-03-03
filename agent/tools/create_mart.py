@@ -61,6 +61,7 @@ Rules:
 - Add meaningful column aliases
 - Do NOT use comments in SQL
 - Wrap the SQL in ```sql code blocks
+- Tables marked [EXTERNAL] are from an external database. Use them normally in your SQL (no schema prefix needed).
 
 {schema}
 """
@@ -186,8 +187,8 @@ def create_mart(
         metadata={"mart_name": extracted_name},
     )
 
-    # 4. SQL 실행
-    exec_result = execute_write(sql)
+    # 4. SQL 실행 — 외부 테이블이면 외부 DB에서 SELECT 후 내부에 마트 생성
+    exec_result = _execute_mart_sql(sql, extracted_name)
 
     if not exec_result["success"]:
         log_action(
@@ -444,6 +445,159 @@ def _format_columns_brief(columns_json: list[dict]) -> str:
     if len(columns_json) > 10:
         text += f" ... 외 {len(columns_json) - 10}개"
     return text
+
+
+def _execute_mart_sql(sql: str, mart_name: str) -> dict:
+    """
+    마트 SQL 실행 — 외부 테이블 자동 감지 및 라우팅.
+
+    내부 테이블만 참조하면 기존 execute_write()로 실행.
+    외부 테이블을 참조하면 SELECT 부분을 외부 DB에서 실행한 뒤
+    결과를 내부 DB에 테이블로 생성.
+    """
+    from agent.tools.query_db import _detect_query_target, _extract_table_names
+
+    target = _detect_query_target(sql)
+
+    if target == "internal":
+        return execute_write(sql)
+
+    if target == "mixed":
+        return {
+            "success": False,
+            "rows_affected": 0,
+            "error": "내부 테이블과 외부 테이블을 함께 사용하는 마트는 지원하지 않습니다.",
+            "sql": sql,
+        }
+
+    if target.startswith("external:"):
+        db_name = target.split(":", 1)[1]
+        return _create_mart_from_external(sql, mart_name, db_name)
+
+    return execute_write(sql)
+
+
+def _create_mart_from_external(sql: str, mart_name: str, db_name: str) -> dict:
+    """
+    외부 DB에서 SELECT를 실행하고 결과를 내부 DB에 마트 테이블로 생성.
+
+    1. CREATE TABLE ... AS SELECT에서 SELECT 부분 추출
+    2. 외부 DB 플러그인으로 SELECT 실행
+    3. 결과 데이터로 내부 DB에 테이블 생성 + INSERT
+    """
+    # SELECT 부분 추출
+    select_sql = _extract_select_from_create(sql)
+    if not select_sql:
+        return {
+            "success": False,
+            "rows_affected": 0,
+            "error": "CREATE TABLE AS SELECT에서 SELECT 부분을 추출할 수 없습니다.",
+            "sql": sql,
+        }
+
+    # 외부 DB에서 SELECT 실행
+    from db.external.registry import get_external_db
+    plugin = get_external_db(db_name)
+    if not plugin:
+        return {
+            "success": False,
+            "rows_affected": 0,
+            "error": f"외부 DB '{db_name}'에 연결되어 있지 않습니다.",
+            "sql": sql,
+        }
+
+    # 마트용이므로 행 수 제한을 넉넉하게 설정
+    result = plugin.execute_query(select_sql, max_rows=100000, timeout=120)
+    if not result["success"]:
+        return {
+            "success": False,
+            "rows_affected": 0,
+            "error": f"외부 DB 조회 실패: {result['error']}",
+            "sql": sql,
+        }
+
+    data = result["data"]
+    if not data:
+        return {
+            "success": False,
+            "rows_affected": 0,
+            "error": "외부 DB 조회 결과가 비어 있습니다.",
+            "sql": sql,
+        }
+
+    # 내부 DB에 테이블 생성 + INSERT
+    try:
+        from db.connection import get_cursor as get_internal_cursor
+        columns = list(data[0].keys())
+        col_defs = ", ".join(f'"{c}" TEXT' for c in columns)
+        col_names = ", ".join(f'"{c}"' for c in columns)
+        placeholders = ", ".join(["%s"] * len(columns))
+
+        with get_internal_cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS {mart_name}")
+            cur.execute(f"CREATE TABLE {mart_name} ({col_defs})")
+
+            # 배치 INSERT
+            insert_sql = f"INSERT INTO {mart_name} ({col_names}) VALUES ({placeholders})"
+            batch = [tuple(str(row.get(c, "")) if row.get(c) is not None else None for c in columns) for row in data]
+            from psycopg2.extras import execute_batch
+            execute_batch(cur, insert_sql, batch, page_size=1000)
+
+        # 타입 캐스팅 — 숫자/날짜 컬럼을 적절한 타입으로 변환
+        _auto_cast_columns(mart_name, data[0])
+
+        logger.info(f"Mart '{mart_name}' created from external DB '{db_name}': {len(data)} rows")
+        return {
+            "success": True,
+            "rows_affected": len(data),
+            "error": None,
+            "sql": sql,
+        }
+    except Exception as e:
+        logger.error(f"Failed to create mart from external: {e}")
+        return {
+            "success": False,
+            "rows_affected": 0,
+            "error": str(e),
+            "sql": sql,
+        }
+
+
+def _extract_select_from_create(sql: str) -> str:
+    """CREATE TABLE ... AS SELECT에서 SELECT 부분을 추출."""
+    match = re.search(r"\bAS\s+(SELECT\b.+)", sql, re.IGNORECASE | re.DOTALL)
+    return match.group(1).rstrip(";").strip() if match else ""
+
+
+def _auto_cast_columns(mart_name: str, sample_row: dict):
+    """
+    TEXT로 생성된 컬럼을 실제 데이터 타입으로 자동 캐스팅.
+
+    ALTER COLUMN ... TYPE ... USING 으로 변환 시도하고 실패하면 TEXT 유지.
+    """
+    from db.connection import get_cursor as get_internal_cursor
+
+    for col, val in sample_row.items():
+        if val is None:
+            continue
+        target_type = None
+        if isinstance(val, bool):
+            target_type = "BOOLEAN"
+        elif isinstance(val, int):
+            target_type = "BIGINT"
+        elif isinstance(val, float):
+            target_type = "DOUBLE PRECISION"
+        # date/datetime 등은 문자열로 들어오므로 NUMERIC 우선 시도
+        if not target_type:
+            continue
+        try:
+            with get_internal_cursor() as cur:
+                cur.execute(
+                    f'ALTER TABLE {mart_name} ALTER COLUMN "{col}" '
+                    f"TYPE {target_type} USING \"{col}\"::{target_type}"
+                )
+        except Exception:
+            pass  # TEXT 유지
 
 
 def _mart_error(
